@@ -1,0 +1,15 @@
+[project]
+name = "natalidade"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Felipe Moura", email = "olive.felipe2014@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.5.5",
+    "pandas>=3.0.6",
+    "python-dotenv>=1.2.3",
+    "requests>=2.34.2",
+]

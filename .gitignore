@@ -1,0 +1,17 @@
+# Credenciais
+.env
+
+# Ambiente virtual
+.venv/
+
+# Dados brutos
+data/raw/*
+!data/raw/.gitkeep
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
