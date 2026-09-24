@@ -4,7 +4,7 @@ Projeto da disciplina Introdução à Ciência de Dados (IFMA).
 
 ## Requisitos
 
-- [uv](https://docs.astral.sh/uv/)
+- Instalar o gerenciador de pacotes [uv](https://docs.astral.sh/uv/)
 
 ## Como rodar
 
