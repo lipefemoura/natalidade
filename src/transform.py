@@ -1,10 +1,11 @@
-"""Transformação e validação dos dados da Tabela 2609 do IBGE/SIDRA."""
+"""Leva os nascidos vivos registrados de data/raw/ para data/trusted/, validando na fronteira."""
 
 import json
 from pathlib import Path
 
 import pandas as pd
 import pandera.pandas as pa
+from pandera.pandas import Check, Column, DataFrameSchema
 
 
 # ============================================================
@@ -12,523 +13,194 @@ import pandera.pandas as pa
 # ============================================================
 
 DIR_RAW = Path("data/raw/ibge_sidra_2609")
-DIR_TRUSTED = Path("data/trusted")
-DIR_QUARENTENA = Path("data/quarentena")
+TRUSTED = Path("data/trusted/nascimentos.parquet")
+QUARENTENA = Path("data/quarentena/rejeitados.parquet")
 
-ARQUIVO_TRUSTED = DIR_TRUSTED / "nascimentos.parquet"
-ARQUIVO_QUARENTENA = DIR_QUARENTENA / "rejeitados.parquet"
+# Nove faixas de idade e a idade ignorada: juntas, cobrem todos os nascimentos sem repetição
+FAIXAS = [
+    "Menos de 15 anos", "15 a 19 anos", "20 a 24 anos", "25 a 29 anos", "30 a 34 anos",
+    "35 a 39 anos", "40 a 44 anos", "45 a 49 anos", "50 anos ou mais", "Ignorada",
+]
 
-FAIXAS_IDADE = {
-    "Menos de 15 anos",
-    "15 a 19 anos",
-    "20 a 24 anos",
-    "25 a 29 anos",
-    "30 a 34 anos",
-    "35 a 39 anos",
-    "40 a 44 anos",
-    "45 a 49 anos",
-    "50 anos ou mais",
-    "Ignorada",
-}
+COLUNAS = [
+    "cod_municipio", "municipio", "ano", "faixa_idade_mae",
+    "nascidos", "valor_era_traco", "total_municipio_ano",
+]
+CHAVE = ["cod_municipio", "ano", "faixa_idade_mae"]
+
+# Participação no total do estado, comparada com a participação mediana do município
+LIMITE_BAIXO, LIMITE_ALTO = 0.25, 3
 
 
 # ============================================================
-# LEITURA
+# CONTRATO
 # ============================================================
 
-def localizar_arquivos() -> list[Path]:
-    """Localiza os arquivos JSON da camada raw."""
+CONTRATO = DataFrameSchema(
+    columns={
+        "cod_municipio": Column(
+            str, Check.str_matches(r"^21\d{5}$", error="municipio_fora_do_maranhao"), nullable=False
+        ),
+        "municipio": Column(
+            str, Check.str_length(min_value=1, error="municipio_sem_nome"), nullable=False
+        ),
+        "ano": Column(
+            int, Check.in_range(2003, 2024, error="ano_fora_da_janela"), nullable=False
+        ),
+        "faixa_idade_mae": Column(
+            str, Check.isin(FAIXAS, error="faixa_fora_do_dominio"), nullable=False
+        ),
+        "nascidos": Column(
+            int, Check.greater_than_or_equal_to(0, error="nascidos_negativo"), nullable=False
+        ),
+        "valor_era_traco": Column(bool, nullable=False),
+        "total_municipio_ano": Column(
+            int, Check.greater_than_or_equal_to(0, error="total_negativo"), nullable=False
+        ),
+    },
+    checks=[
+        Check(
+            lambda df: df["nascidos"] <= df["total_municipio_ano"],
+            error="faixa_maior_que_total",
+        ),
+        Check(
+            lambda df: df.groupby(["cod_municipio", "ano"])["nascidos"].transform("sum")
+            == df["total_municipio_ano"],
+            error="soma_das_faixas_difere_do_total",
+        ),
+        Check(
+            lambda df: ~df["valor_era_traco"] | (df["nascidos"] == 0),
+            error="traco_com_valor_diferente_de_zero",
+        ),
+    ],
+    unique=CHAVE,
+    coerce=True,
+    strict=True,
+)
 
-    arquivos = sorted(
-        DIR_RAW.glob("**/uf21_*.json")
-    )
 
+# ============================================================
+# ETAPAS
+# ============================================================
+
+def carregar(diretorio: Path) -> pd.DataFrame:
+    """Lê os JSON da coleta mais recente e remove as linhas repetidas na íntegra."""
+    coleta = max(p for p in diretorio.iterdir() if p.is_dir())
+    arquivos = sorted(coleta.glob("uf21_*.json"))
     if not arquivos:
-        raise FileNotFoundError(
-            f"Nenhum arquivo encontrado em: {DIR_RAW}"
-        )
-
-    return arquivos
-
-
-def carregar_dados() -> pd.DataFrame:
-    """Carrega os registros dos envelopes JSON."""
+        raise FileNotFoundError(f"Nenhum arquivo de coleta em {coleta}")
 
     registros = []
-
-    arquivos = localizar_arquivos()
-
     for arquivo in arquivos:
-        print(f"Lendo: {arquivo}")
+        envelope = json.loads(arquivo.read_text(encoding="utf-8"))
+        registros.extend(envelope["dado"][1:])  # o primeiro item é o cabeçalho da API
 
-        with arquivo.open(
-            "r",
-            encoding="utf-8",
-        ) as f:
-            envelope = json.load(f)
-
-        dados = envelope.get("dado", [])
-
-        if not isinstance(dados, list) or len(dados) < 2:
-            raise RuntimeError(
-                f"Arquivo sem registros válidos: {arquivo}"
-            )
-
-        # O primeiro item é o cabeçalho do SIDRA.
-        registros.extend(dados[1:])
-
-    print(
-        f"  Registros carregados: {len(registros)}"
-    )
-
-    return pd.DataFrame(registros)
+    print(f"coleta: {coleta.name} | {len(arquivos)} arquivos | {len(registros)} registros")
+    return pd.DataFrame(registros).drop_duplicates().reset_index(drop=True)
 
 
-# ============================================================
-# HIGIENIZAÇÃO
-# ============================================================
+def higienizar(df: pd.DataFrame) -> pd.DataFrame:
+    """Nomes legíveis, '-' como zero (com indicadora), números como inteiros, nome sem a UF."""
+    simbolos = set(df.loc[~df["V"].str.fullmatch(r"\d+"), "V"]) - {"-"}
+    if simbolos:
+        raise ValueError(f"Símbolos desconhecidos em valor: {sorted(simbolos)}")
 
-def higienizar(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    """Padroniza os campos necessários para a análise."""
-
-    resultado = pd.DataFrame()
-
-    resultado["codigo_municipio"] = (
-        df["D1C"]
-        .astype(str)
-        .str.strip()
-    )
-
-    resultado["nome_municipio"] = (
-        df["D1N"]
-        .astype(str)
-        .str.strip()
-    )
-
-    resultado["ano"] = pd.to_numeric(
-        df["D2C"],
-        errors="coerce",
-    )
-
-    resultado["variavel_codigo"] = (
-        df["D3C"]
-        .astype(str)
-        .str.strip()
-    )
-
-    resultado["variavel"] = (
-        df["D3N"]
-        .astype(str)
-        .str.strip()
-    )
-
-    resultado["sexo"] = (
-        df["D4N"]
-        .astype(str)
-        .str.strip()
-    )
-
-    resultado["ano_nascimento"] = (
-        df["D5N"]
-        .astype(str)
-        .str.strip()
-    )
-
-    resultado["faixa_idade_mae"] = (
-        df["D6N"]
-        .astype(str)
-        .str.strip()
-    )
-
-    resultado["codigo_idade_mae"] = (
-        df["D6C"]
-        .astype(str)
-        .str.strip()
-    )
-
-    resultado["valor_bruto"] = (
-        df["V"]
-        .astype(str)
-        .str.strip()
-    )
-
-    return resultado
+    return pd.DataFrame({
+        "cod_municipio": df["D1C"],
+        "municipio": df["D1N"].str.removesuffix(" - MA"),
+        "ano": df["D2C"].astype(int),
+        "idade_mae": df["D6N"],
+        "nascidos": df["V"].replace("-", "0").astype(int),
+        "valor_era_traco": df["V"] == "-",
+    })
 
 
-# ============================================================
-# VALIDAÇÃO
-# ============================================================
+def tratar(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Mantém as dez faixas com o total do município e separa os municípios e anos atípicos.
 
-def validar_categorias_idade(
-    df: pd.DataFrame,
-) -> None:
-    """Verifica se a dimensão de idade materna foi coletada."""
-
-    categorias = sorted(
-        df["faixa_idade_mae"]
-        .dropna()
-        .unique()
-        .tolist()
-    )
-
-    print(
-        "\nCategorias de idade materna encontradas:"
-    )
-
-    for categoria in categorias:
-        print(f"  - {categoria}")
-
-    if categorias == ["Total"]:
-        raise RuntimeError(
-            "A coleta contém somente a categoria 'Total' "
-            "para idade da mãe.\n\n"
-            "A pergunta analítica exige a comparação por "
-            "faixa etária da mãe.\n\n"
-            "A coleta deve ser corrigida antes de gerar "
-            "a camada trusted."
-        )
-
-
-def validar_schema(
-    df: pd.DataFrame,
-) -> None:
-    """Valida a estrutura e os tipos dos dados."""
-
-    schema = pa.DataFrameSchema(
-        {
-            "codigo_municipio": pa.Column(
-                str,
-                nullable=False,
-            ),
-            "nome_municipio": pa.Column(
-                str,
-                nullable=False,
-            ),
-            "ano": pa.Column(
-                int,
-                nullable=False,
-            ),
-            "variavel_codigo": pa.Column(
-                str,
-                nullable=False,
-            ),
-            "variavel": pa.Column(
-                str,
-                nullable=False,
-            ),
-            "sexo": pa.Column(
-                str,
-                nullable=False,
-            ),
-            "ano_nascimento": pa.Column(
-                str,
-                nullable=False,
-            ),
-            "faixa_idade_mae": pa.Column(
-                str,
-                nullable=False,
-            ),
-            "codigo_idade_mae": pa.Column(
-                str,
-                nullable=False,
-            ),
-            "valor_bruto": pa.Column(
-                str,
-                nullable=False,
-            ),
-        },
-        strict=True,
-    )
-
-    schema.validate(df)
-
-
-# ============================================================
-# REGRAS DE NEGÓCIO
-# ============================================================
-
-def aplicar_regras(
-    df: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    Devolve (tratado, quarentena dos atípicos).
     """
-    Aplica as regras de qualidade.
+    total = (
+        df.loc[df["idade_mae"] == "Total", ["cod_municipio", "ano", "nascidos"]]
+        .rename(columns={"nascidos": "total_municipio_ano"})
+    )
+    faixas = (
+        df[df["idade_mae"].isin(FAIXAS)]
+        .rename(columns={"idade_mae": "faixa_idade_mae"})
+        .merge(total, on=["cod_municipio", "ano"], how="left", validate="many_to_one")
+    )[COLUNAS]
 
-    Os registros válidos para o recorte analítico seguem
-    para trusted.
+    pares = faixas.drop_duplicates(["cod_municipio", "ano"])[["cod_municipio", "ano", "total_municipio_ano"]]
+    participacao = pares["total_municipio_ano"] / pares.groupby("ano")["total_municipio_ano"].transform("sum")
+    razao = participacao / participacao.groupby(pares["cod_municipio"]).transform("median")
+    atipicos = pares.loc[(razao < LIMITE_BAIXO) | (razao > LIMITE_ALTO), ["cod_municipio", "ano"]]
 
-    Registros com problemas de qualidade são enviados
-    para quarentena.
+    marcado = faixas.merge(atipicos, on=["cod_municipio", "ano"], how="left", indicator=True)
+    em_quarentena = marcado["_merge"] == "both"
+    marcado = marcado.drop(columns="_merge")
 
-    Categorias de idade individual e "Total" são válidas
-    no SIDRA, mas ficam fora do escopo desta análise.
+    quarentena = marcado[em_quarentena].assign(motivo="participacao_atipica_no_municipio")
+    tratado = marcado[~em_quarentena].reset_index(drop=True)
+    return tratado, quarentena.reset_index(drop=True)
+
+
+def validar(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Aplica o contrato. Devolve (aprovado, reprovado com motivo). Não grava nada.
+
+    Uma linha reprovada leva junto as demais faixas do mesmo município e ano, porque as
+    dez faixas só fazem sentido completas. Falha sem linha é de estrutura: nada é gravado.
     """
+    try:
+        return CONTRATO.validate(df, lazy=True), df.iloc[0:0].assign(motivo=pd.Series(dtype=str))
+    except pa.errors.SchemaErrors as erro:
+        falhas = erro.failure_cases
+        if falhas["index"].isna().any():
+            raise SystemExit(f"Contrato quebrado na estrutura, nada foi gravado:\n{falhas}")
 
-    trabalho = df.copy()
+        motivo_por_linha = falhas.groupby("index")["check"].agg(lambda s: ", ".join(sorted(set(map(str, s)))))
+        pares = df.loc[motivo_por_linha.index, ["cod_municipio", "ano"]].drop_duplicates()
+        no_par = df.merge(pares, on=["cod_municipio", "ano"], how="left", indicator=True)["_merge"].eq("both")
+        no_par.index = df.index
 
-    # --------------------------------------------------------
-    # 1. Município
-    # --------------------------------------------------------
-
-    mascara_municipio = trabalho[
-        "codigo_municipio"
-    ].str.match(
-        r"^21\d{5}$",
-        na=False,
-    )
-
-    rejeitados_municipio = trabalho.loc[
-        ~mascara_municipio
-    ].copy()
-
-    trabalho = trabalho.loc[
-        mascara_municipio
-    ].copy()
-
-    # --------------------------------------------------------
-    # 2. Ano
-    # --------------------------------------------------------
-
-    mascara_ano = trabalho["ano"].between(
-        2003,
-        2024,
-    )
-
-    rejeitados_ano = trabalho.loc[
-        ~mascara_ano
-    ].copy()
-
-    trabalho = trabalho.loc[
-        mascara_ano
-    ].copy()
-
-    # --------------------------------------------------------
-    # 3. Variável
-    # --------------------------------------------------------
-
-    mascara_variavel = (
-        trabalho["variavel_codigo"] == "217"
-    )
-
-    rejeitados_variavel = trabalho.loc[
-        ~mascara_variavel
-    ].copy()
-
-    trabalho = trabalho.loc[
-        mascara_variavel
-    ].copy()
-
-    # --------------------------------------------------------
-    # 4. Sexo e ano de nascimento
-    # --------------------------------------------------------
-
-    mascara_total = (
-        (trabalho["sexo"] == "Total")
-        & (trabalho["ano_nascimento"] == "Total")
-    )
-
-    rejeitados_total = trabalho.loc[
-        ~mascara_total
-    ].copy()
-
-    trabalho = trabalho.loc[
-        mascara_total
-    ].copy()
-
-    # --------------------------------------------------------
-    # 5. Idade materna
-    # --------------------------------------------------------
-
-    # O IBGE disponibiliza faixas agregadas, idades
-    # individuais e o total geral.
-    #
-    # Para esta análise, utilizamos somente as 10
-    # categorias agregadas definidas no recorte analítico.
-    #
-    # As idades individuais e "Total" são dados válidos,
-    # porém ficam fora do escopo da análise.
-
-    mascara_idade = trabalho[
-        "faixa_idade_mae"
-    ].isin(
-        FAIXAS_IDADE
-    )
-
-    trabalho = trabalho.loc[
-        mascara_idade
-    ].copy()
-
-    # --------------------------------------------------------
-    # 6. Valores
-    # --------------------------------------------------------
-
-    # Segundo a convenção do SIDRA, "-" representa
-    # zero absoluto.
-    #
-    # Portanto, a conversão para 0 não é uma imputação.
-    # É a transformação da representação textual oficial
-    # para formato numérico.
-
-    trabalho["valor_bruto"] = trabalho[
-        "valor_bruto"
-    ].replace(
-        {
-            "-": "0",
-        }
-    )
-
-    valor_numerico = pd.to_numeric(
-        trabalho["valor_bruto"],
-        errors="coerce",
-    )
-
-    mascara_valor = valor_numerico.notna()
-
-    rejeitados_valor = trabalho.loc[
-        ~mascara_valor
-    ].copy()
-
-    trabalho = trabalho.loc[
-        mascara_valor
-    ].copy()
-
-    trabalho["valor"] = valor_numerico.loc[
-        trabalho.index
-    ].astype("int64")
-
-    # --------------------------------------------------------
-    # 7. Duplicidades
-    # --------------------------------------------------------
-
-    chaves = [
-        "codigo_municipio",
-        "ano",
-        "faixa_idade_mae",
-    ]
-
-    duplicados = trabalho[
-        trabalho.duplicated(
-            subset=chaves,
-            keep=False,
+        reprovado = df[no_par].assign(
+            motivo=motivo_por_linha.reindex(df.index[no_par]).fillna("municipio_ano_com_faixa_reprovada")
         )
-    ].copy()
-
-    trabalho = trabalho.drop_duplicates(
-        subset=chaves,
-        keep="first",
-    )
-
-    # --------------------------------------------------------
-    # Quarentena
-    # --------------------------------------------------------
-
-    rejeitados = pd.concat(
-        [
-            rejeitados_municipio,
-            rejeitados_ano,
-            rejeitados_variavel,
-            rejeitados_total,
-            rejeitados_valor,
-            duplicados,
-        ],
-        ignore_index=True,
-    )
-
-    return trabalho, rejeitados
+        aprovado = CONTRATO.validate(df[~no_par])
+        return aprovado, reprovado
 
 
-# ============================================================
-# SALVAMENTO
-# ============================================================
-
-def salvar(
-    trusted: pd.DataFrame,
-    rejeitados: pd.DataFrame,
-) -> None:
-    """Salva as camadas trusted e quarentena."""
-
-    DIR_TRUSTED.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    DIR_QUARENTENA.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    trusted.to_parquet(
-        ARQUIVO_TRUSTED,
-        index=False,
-    )
-
-    rejeitados.to_parquet(
-        ARQUIVO_QUARENTENA,
-        index=False,
+def ordenar(df: pd.DataFrame) -> pd.DataFrame:
+    """Ordena por município, ano e faixa (na ordem das idades), para a saída ser estável."""
+    ordem_faixa = {faixa: i for i, faixa in enumerate(FAIXAS)}
+    return (
+        df.sort_values(
+            CHAVE, key=lambda c: c.map(ordem_faixa) if c.name == "faixa_idade_mae" else c
+        )
+        .reset_index(drop=True)
     )
 
 
 # ============================================================
-# EXECUÇÃO
+# EXECUÇÃO PRINCIPAL
 # ============================================================
 
 def main() -> None:
+    tratado, quarentena_atipicos = tratar(higienizar(carregar(DIR_RAW)))
+    aprovado, reprovado = validar(tratado)
 
-    print("=" * 70)
-    print(
-        "TRANSFORMAÇÃO DOS DADOS DE NASCIMENTOS - IBGE/SIDRA"
-    )
-    print("=" * 70)
+    rejeitado = pd.concat([quarentena_atipicos, reprovado], ignore_index=True)
+    rejeitado["detectado_em"] = pd.Timestamp.now(tz="UTC")
 
-    print("\n[1/5] Carregando dados brutos...")
+    TRUSTED.parent.mkdir(parents=True, exist_ok=True)
+    ordenar(aprovado).to_parquet(TRUSTED, index=False)
 
-    df_raw = carregar_dados()
+    QUARENTENA.parent.mkdir(parents=True, exist_ok=True)
+    ordenar(rejeitado).to_parquet(QUARENTENA, index=False)
 
-    print("\n[2/5] Higienizando dados...")
-
-    df = higienizar(df_raw)
-
-    print(
-        "\n[3/5] Verificando categorias de idade..."
-    )
-
-    validar_categorias_idade(df)
-
-    print("\n[4/5] Validando schema...")
-
-    validar_schema(df)
-
-    print(
-        "\n[5/5] Aplicando regras de qualidade..."
-    )
-
-    trusted, rejeitados = aplicar_regras(df)
-
-    print()
-    print(
-        f"Registros trusted: {len(trusted)}"
-    )
-    print(
-        f"Registros em quarentena: {len(rejeitados)}"
-    )
-
-    salvar(
-        trusted,
-        rejeitados,
-    )
-
-    print()
-    print("=" * 70)
-    print("TRANSFORMAÇÃO CONCLUÍDA")
-    print("=" * 70)
-    print(
-        f"Trusted: {ARQUIVO_TRUSTED}"
-    )
-    print(
-        f"Quarentena: {ARQUIVO_QUARENTENA}"
-    )
-    print("=" * 70)
+    print(f"trusted:    {len(aprovado):6d} linhas -> {TRUSTED}")
+    print(f"quarentena: {len(rejeitado):6d} linhas -> {QUARENTENA}")
+    for motivo, n in rejeitado["motivo"].value_counts().items():
+        print(f"  {motivo:40} {n}")
 
 
 if __name__ == "__main__":
