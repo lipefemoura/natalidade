@@ -19,5 +19,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "jupyter>=1.1.1",
+    "missingno>=0.5.2",
     "quarto-cli>=1.10.18",
 ]
