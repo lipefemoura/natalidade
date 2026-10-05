@@ -1,51 +1,49 @@
 # natalidade
 
-Projeto da disciplina Introdução à Ciência de Dados (IFMA).
+Projeto da disciplina Introdução à Ciência de Dados (Sistemas de Informação, IFMA).
 
-## Requisitos
+**Pergunta analítica:** entre 2003 e 2024, em que municípios do Maranhão e em que faixas
+de idade da mãe os nascimentos registrados mais caíram?
 
-- Instalar o gerenciador de pacotes [uv](https://docs.astral.sh/uv/)
+**Fonte:** IBGE, API do SIDRA, [tabela 2609](https://sidra.ibge.gov.br/tabela/2609)
+(Estatísticas do Registro Civil): nascidos vivos registrados no ano, por município do
+Maranhão e idade da mãe na ocasião do parto, de 2003 a 2024.
 
-## Como rodar
+## Chave de acesso
+
+A fonte não exige chave nem cadastro. O `.env.example` existe apenas por convenção do
+projeto e não declara variáveis.
+
+## Como executar
+
+Requer o [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone <url-do-repositorio>
+git clone https://github.com/lipefemoura/natalidade.git
 cd natalidade
 uv sync
 uv run python src/ingest.py
+uv run quarto render diagnostico.qmd
+uv run python src/transform.py
 ```
 
-## Configuração
+## O que cada etapa produz
 
-Crie um arquivo `.env` na raiz do projeto com a variável `CSV_PATH`, que aponta para
-o CSV a ser lido. O jeito mais simples é copiar o modelo:
+| Etapa | Saída |
+|---|---|
+| `src/ingest.py` | `data/raw/ibge_sidra_2609/AAAA-MM-DD/uf21_ANO.json`: um arquivo por ano, com a resposta original da API e a proveniência (fonte, URL, data da coleta). A pasta leva a data da execução. |
+| `diagnostico.qmd` | `diagnostico.html`: perfil, duplicatas, tabela de decisão e tratamento do dado bruto. |
+| `src/transform.py` | `data/trusted/`: dado tratado e validado pelo contrato. `data/quarentena/`: linhas reprovadas, com o motivo. |
 
-```bash
-cp .env.example .env
-```
-
-O `.env` não é versionado. Se `CSV_PATH` não estiver definida, o script para com
-`KeyError`.
-
-## Dados
-
-O conteúdo de `data/raw/` não é versionado, então o clone chega com a pasta vazia.
-Coloque ali o CSV indicado em `CSV_PATH`. Para o exemplo padrão, crie
-`data/raw/exemplo.csv` com:
-
-```csv
-ano,nascidos
-2022,100
-2023,95
-2024,90
-```
+<!-- TODO: completar com os nomes dos arquivos e as colunas quando o transform.py estiver pronto -->
 
 ## Estrutura
 
 ```
-data/raw/       dado bruto, imutável: nunca editar, nunca deletar
-data/trusted/   dado limpo e checado
-src/ingest.py   da fonte para data/raw/
-src/transform.py  de data/raw/ para data/trusted/
-docs/           análise
+data/raw/          dado bruto, imutável (fora do git, recriado pelo ingest.py)
+data/trusted/      dado tratado e validado (recriado pelo transform.py)
+data/quarentena/   linhas reprovadas, com motivo (recriado pelo transform.py)
+src/ingest.py      da fonte para data/raw/
+src/transform.py   de data/raw/ para data/trusted/
+diagnostico.qmd    diagnóstico do dado bruto
 ```

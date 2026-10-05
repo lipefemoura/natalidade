@@ -8,6 +8,16 @@
 data/raw/*
 !data/raw/.gitkeep
 
+# Dados gerados pelo transform.py
+data/trusted/*
+!data/trusted/.gitkeep
+data/quarentena/
+
+# Saídas do Quarto
+.quarto/
+diagnostico.html
+diagnostico_files/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
