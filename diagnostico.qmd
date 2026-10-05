@@ -1,0 +1,645 @@
+---
+title: "Diagnóstico do dado bruto"
+subtitle: "Nascidos vivos registrados por município do Maranhão, 2003–2024 (IBGE/SIDRA, tabela 2609)"
+author:
+  - "Gustavo dos Santos Bandeira Rocha (20231SI0006)"
+  - "Deusiane Pimenta Rocha (20231SI0032)"
+  - "Felipe Moura de Oliveira (20231SI0027)"
+date: today
+lang: pt-BR
+format:
+  html:
+    toc: true
+    code-fold: false
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+---
+
+```{python}
+# | label: setup
+from pathlib import Path
+
+import duckdb
+import pandas as pd
+
+pd.set_option("display.width", 120)
+
+# Coleta mais recente: cada execução do ingest.py em um dia diferente cria uma pasta nova
+COLETA = max(p for p in Path("data/raw/ibge_sidra_2609").iterdir() if p.is_dir())
+ARQUIVOS = f"{COLETA.as_posix()}/uf21_*.json"
+
+con = duckdb.connect()
+con.sql(f"""
+CREATE TABLE bruto AS
+WITH registros AS (
+    SELECT unnest(dado) AS r FROM read_json('{ARQUIVOS}')
+)
+SELECT
+    r.D1C AS cod_municipio,      r.D1N AS municipio,
+    r.D2C AS cod_ano,            r.D2N AS ano,
+    r.D6C AS cod_idade_mae,      r.D6N AS idade_mae,
+    r.V   AS valor,
+    r.D3C AS cod_variavel,       r.D3N AS variavel,
+    r.D4C AS cod_sexo,           r.D4N AS sexo,
+    r.D5C AS cod_ano_nascimento, r.D5N AS ano_nascimento,
+    r.MC  AS cod_unidade,        r.MN  AS unidade,
+    r.NC  AS cod_nivel,          r.NN  AS nivel_territorial
+FROM registros
+WHERE r.NC <> 'Nível Territorial (Código)'  -- a primeira linha de cada arquivo é o cabeçalho da API
+""")
+
+arquivos = len(list(COLETA.glob("uf21_*.json")))
+linhas = con.sql("SELECT count(*) FROM bruto").fetchone()[0]
+print(f"coleta: {COLETA.name} | {arquivos} arquivos | {linhas} linhas")
+```
+
+## 1. Perfil do arquivo bruto
+
+```{python}
+# | label: perfil
+perfil = con.sql("SUMMARIZE bruto").df()
+perfil[["column_name", "column_type", "count", "approx_unique", "null_percentage", "min", "max"]]
+```
+
+`approx_unique` é uma estimativa. A contagem exata das colunas que identificam o registro:
+
+```{python}
+# | label: distintos-exatos
+con.sql("""
+    SELECT count(DISTINCT cod_municipio) AS municipios,
+           count(DISTINCT ano)           AS anos,
+           count(DISTINCT idade_mae)     AS categorias_idade,
+           count(DISTINCT valor)         AS valores_distintos
+    FROM bruto
+""").df()
+```
+
+Todas as colunas chegaram como texto (`VARCHAR`), inclusive `ano` e `valor`, que são
+numéricas. Com a ordenação alfabética, o valor 9 vai aparecer depois de qualquer valor numericamente maior começado com 2, por exemplo. Assim, o maior valor na tabela aparece como sendo 999, sendo que existem valores muito maiores, como os 24.181 nascimentos registrados em São Luís em 2003.
+
+A medida `null_percentage` mostra zero em todas as colunas, o que poderia indicar que o dado está completo. Porém, o IBGE usa o símbolo `-` para representar zero, e esse símbolo é um texto, não um valor nulo. Assim, ele não é contado como ausência, mas também não pode ser usado em contas enquanto não for convertido. Ele aparece em 43.186 linhas.
+
+A coluna `idade_mae` tem 46 categorias diferentes, quando o esperado seria em torno de dez faixas de idade. Isso acontece porque a tabela mistura o total, as faixas (15 a 19 anos, por exemplo) e as idades simples (15 anos, 16 anos, e assim por diante). Assim, somar a coluna inteira contaria o mesmo nascimento mais de uma vez.
+
+Oito colunas têm um único valor em todas as linhas, como `sexo` e `ano_nascimento`, sempre iguais a Total. Por isso, essas colunas não ajudam na análise.
+
+Por fim, o `approx_unique` é uma estimativa e pode errar: ele indica 196 municípios, quando a contagem exata da tabela acima mostra 217. Por isso, os números usados daqui em diante são os da contagem exata.
+
+## 2. Duplicatas
+
+```{python}
+# | label: duplicatas
+df = con.sql("SELECT * FROM bruto").df()
+
+# Um registro é identificado pela combinação de município, ano e categoria de idade
+CHAVE = ["cod_municipio", "ano", "cod_idade_mae"]
+
+dup_linha = int(df.duplicated().sum())
+dup_chave = int(df.duplicated(subset=CHAVE).sum())
+print(f"linhas: {len(df)}")
+print(f"duplicadas por linha inteira: {dup_linha}")
+print(f"duplicadas pela chave {' + '.join(CHAVE)}: {dup_chave}")
+```
+
+As duas contagens são zero: nenhuma linha se repete por inteiro, e nenhuma combinação de município, ano e categoria de idade aparece mais de uma vez. Assim, também não existem registros conflitantes, isto é, com a mesma chave e valores diferentes. Mesmo sem duplicatas, a remoção de cópias exatas é mantida abaixo, para que uma coleta futura com linhas repetidas seja tratada antes de qualquer outra estatística.
+
+```{python}
+# | label: dedup
+antes = len(df)
+df = df.drop_duplicates().reset_index(drop=True)
+print(f"{antes} -> {len(df)} linhas apos remover cópias exatas")
+
+assert dup_linha == dup_chave == 0, f"duplicatas: {dup_linha} por linha, {dup_chave} pela chave"
+assert df["cod_municipio"].nunique() == 217, "o Maranhão tem 217 municípios"
+
+combinacoes = df["cod_municipio"].nunique() * df["ano"].nunique() * df["cod_idade_mae"].nunique()
+assert len(df) == combinacoes, f"faltam combinações município × ano × idade: {len(df)} de {combinacoes}"
+```
+
+Além das duplicatas, as verificações acima conferem se a tabela está completa: são exigidos os 217 municípios do Maranhão e todas as combinações de município, ano e categoria de idade. Assim, se uma coleta futura vier com um ano ou uma categoria faltando, o diagnóstico para em vez de seguir com dados incompletos.
+
+## 3. Tabela de decisão
+
+```{python}
+# | label: ausencia-por-coluna
+ausencia = (df.isna().mean() * 100).round(1)
+print(f"colunas com valores nulos: {(ausencia > 0).sum()} de {len(ausencia)}")
+```
+
+Nenhuma coluna tem valores nulos. Os pontos que precisam de decisão neste dado são outros, e cada um é investigado numa subseção abaixo: o símbolo `-` (3.1), as categorias de idade sobrepostas (3.2), a idade ignorada (3.3), o registro tardio (3.4) e os valores atípicos por município (3.5). A tabela de decisão (3.6) reúne as conclusões.
+
+### 3.1 O símbolo `-`
+
+Nas tabelas do IBGE, o `-` representa zero. Os dados faltantes têm outros símbolos (`..`, `...` e `X`). As consultas abaixo verificam se o dado confirma essa convenção.
+
+```{python}
+# | label: traco-frequencia
+con.sql("""
+    SELECT count(*) FILTER (WHERE valor = '-')                               AS tracos,
+           round(100.0 * count(*) FILTER (WHERE valor = '-') / count(*), 1)  AS pct_tracos,
+           count(*) FILTER (WHERE valor = '0')                               AS zeros_escritos,
+           count(*) FILTER (WHERE valor <> '-'
+                            AND NOT regexp_matches(valor, '^[0-9]+$'))       AS outros_simbolos
+    FROM bruto
+""").df()
+```
+
+O `-` aparece em 43.186 células, quase uma em cada cinco. Nenhum zero chega escrito como `0`, e nenhum outro símbolo do IBGE aparece. Assim, todo zero da tabela chega como `-`, e não há nenhum dado marcado como faltante.
+
+```{python}
+# | label: traco-por-categoria
+# Nove faixas de idade e a idade ignorada: juntas, cobrem todos os nascimentos sem repetição
+FAIXAS = [
+    "Menos de 15 anos", "15 a 19 anos", "20 a 24 anos", "25 a 29 anos", "30 a 34 anos",
+    "35 a 39 anos", "40 a 44 anos", "45 a 49 anos", "50 anos ou mais", "Ignorada",
+]
+
+con.sql("""
+    SELECT idade_mae,
+           count(*)                                                          AS celulas,
+           count(*) FILTER (WHERE valor = '-')                               AS tracos,
+           round(100.0 * count(*) FILTER (WHERE valor = '-') / count(*), 1)  AS pct_tracos
+    FROM bruto
+    WHERE idade_mae = 'Total' OR list_contains($faixas, idade_mae)
+    GROUP BY idade_mae
+    ORDER BY pct_tracos DESC
+""", params={"faixas": FAIXAS}).df()
+```
+
+O `-` nunca aparece no Total e se concentra nas idades em que é raro haver nascimentos: 68,3% das células de mães com 50 anos ou mais, contra apenas uma célula, em 4.774, na faixa de 20 a 24 anos. Esse é o comportamento esperado de um zero, e não de um dado perdido, que apareceria espalhado em qualquer categoria.
+
+```{python}
+# | label: traco-prova-da-soma
+con.sql("""
+    WITH valores AS (
+        SELECT cod_municipio, ano, idade_mae,
+               CAST(replace(valor, '-', '0') AS INTEGER) AS nascidos
+        FROM bruto
+    ),
+    soma_faixas AS (
+        SELECT cod_municipio, ano, sum(nascidos) AS soma
+        FROM valores
+        WHERE list_contains($faixas, idade_mae)
+        GROUP BY cod_municipio, ano
+    ),
+    total AS (
+        SELECT cod_municipio, ano, nascidos AS total
+        FROM valores
+        WHERE idade_mae = 'Total'
+    )
+    SELECT count(*)                             AS pares_municipio_ano,
+           count(*) FILTER (WHERE soma = total) AS somas_que_batem
+    FROM soma_faixas JOIN total USING (cod_municipio, ano)
+""", params={"faixas": FAIXAS}).df()
+```
+
+Contando o `-` como zero, a soma das faixas de idade é igual ao Total em todos os 4.774 pares de município e ano. Se o `-` representasse um valor desconhecido, as somas não fechariam. Portanto, o `-` é zero, e não um dado faltante: a decisão é convertê-lo em `0`, com uma coluna indicadora que registra quais valores vieram como `-`.
+
+### 3.2 Categorias de idade sobrepostas
+
+```{python}
+# | label: idade-niveis
+con.sql("""
+    WITH valores AS (
+        SELECT idade_mae,
+               CAST(replace(valor, '-', '0') AS INTEGER) AS nascidos,
+               CASE WHEN idade_mae = 'Total'              THEN '1. Total'
+                    WHEN list_contains($faixas, idade_mae) THEN '2. Faixas'
+                    ELSE '3. Idades simples' END          AS nivel
+        FROM bruto
+    )
+    SELECT nivel, count(DISTINCT idade_mae) AS categorias, CAST(sum(nascidos) AS BIGINT) AS nascidos
+    FROM valores
+    GROUP BY nivel
+    UNION ALL
+    SELECT 'Soma de tudo', count(DISTINCT idade_mae), CAST(sum(nascidos) AS BIGINT)
+    FROM valores
+    ORDER BY nivel
+""", params={"faixas": FAIXAS}).df()
+```
+
+A coluna `idade_mae` traz a mesma informação em três níveis: o Total, as dez faixas e as 35 idades simples. Somando todas as 46 categorias, o resultado é 8.256.468 nascimentos, quase três vezes o total real de 2.776.933. Isso acontece porque a mesma criança é contada no Total, na sua faixa e na sua idade. As idades simples somam menos que o Total porque só existem de 15 a 49 anos: as categorias "Menos de 15 anos", "50 anos ou mais" e "Ignorada" não têm idades simples.
+
+```{python}
+# | label: idade-simples-prova
+con.sql(r"""
+    WITH valores AS (
+        SELECT cod_municipio, ano, idade_mae,
+               CAST(replace(valor, '-', '0') AS INTEGER) AS nascidos
+        FROM bruto
+    ),
+    idades AS (
+        SELECT cod_municipio, ano, nascidos,
+               TRY_CAST(regexp_extract(idade_mae, '^(\d+) anos$', 1) AS INTEGER) AS idade
+        FROM valores
+        WHERE regexp_matches(idade_mae, '^\d+ anos$')
+    ),
+    faixas AS (
+        SELECT cod_municipio, ano, idade_mae AS faixa, nascidos,
+               TRY_CAST(regexp_extract(idade_mae, '^(\d+) a', 1) AS INTEGER) AS inicio
+        FROM valores
+        WHERE regexp_matches(idade_mae, '^\d+ a \d+ anos$')
+    ),
+    comparacao AS (
+        SELECT f.cod_municipio, f.ano, f.faixa,
+               any_value(f.nascidos) AS nascidos_faixa,
+               sum(i.nascidos)       AS soma_idades
+        FROM faixas f
+        JOIN idades i
+          ON i.cod_municipio = f.cod_municipio
+         AND i.ano = f.ano
+         AND i.idade BETWEEN f.inicio AND f.inicio + 4
+        GROUP BY f.cod_municipio, f.ano, f.faixa
+    )
+    SELECT count(DISTINCT faixa)                                AS faixas_comparadas,
+           count(*)                                             AS comparacoes,
+           count(*) FILTER (WHERE nascidos_faixa = soma_idades) AS somas_que_batem
+    FROM comparacao
+""").df()
+```
+
+Cada idade simples também se encaixa na sua faixa: por exemplo, a soma de 15, 16, 17, 18 e 19 anos é igual à faixa de 15 a 19 anos. Isso vale para as sete faixas de cinco anos, em todos os municípios e anos: são 33.418 comparações, todas iguais. Junto com a prova da seção 3.1, em que as faixas somam o Total, isso mostra que o dado é consistente: os três níveis trazem a mesma informação com detalhes diferentes.
+
+Assim, a decisão é manter apenas as dez faixas, que cobrem todos os nascimentos sem repetição e correspondem ao nível usado na pergunta. As idades simples são descartadas, e o Total é mantido como uma coluna à parte (`total_municipio_ano`), que permite verificar, no tratamento, que nenhuma faixa ultrapassa o total do seu município e ano.
+
+### 3.3 Idade da mãe ignorada
+
+A categoria "Ignorada" reúne os nascimentos em que a idade da mãe não foi informada no registro. Diferente do `-`, aqui falta informação de verdade, e por isso ela é a única ausência deste dado que se classifica pelos tipos de Rubin.
+
+```{python}
+# | label: ignorada-base
+con.sql("""
+    CREATE OR REPLACE VIEW ignorada AS
+    SELECT cod_municipio, municipio, CAST(ano AS INTEGER) AS ano,
+           CAST(sum(CAST(replace(valor, '-', '0') AS INTEGER)) FILTER (WHERE idade_mae = 'Ignorada') AS BIGINT) AS ignorada,
+           CAST(sum(CAST(replace(valor, '-', '0') AS INTEGER)) FILTER (WHERE idade_mae = 'Total') AS BIGINT)    AS total
+    FROM bruto
+    GROUP BY cod_municipio, municipio, ano
+""")
+
+con.sql("""
+    SELECT ano,
+           CAST(sum(ignorada) AS BIGINT)                AS ignorada,
+           CAST(sum(total) AS BIGINT)                   AS total,
+           round(100.0 * sum(ignorada) / sum(total), 2) AS pct_ignorada
+    FROM ignorada
+    GROUP BY ano
+    ORDER BY ano
+""").df()
+```
+
+```{python}
+# | label: ignorada-periodos
+con.sql("""
+    SELECT CASE WHEN ano <= 2010 THEN '2003 a 2010' ELSE '2011 a 2024' END AS periodo,
+           round(100.0 * sum(ignorada) / sum(total), 2)                    AS pct_ignorada
+    FROM ignorada
+    GROUP BY periodo
+    ORDER BY periodo
+""").df()
+```
+
+A idade ignorada é pouca, mas não está espalhada ao acaso no tempo. Entre 2003 e 2010, ela representa 2,02% dos nascimentos, com pico de 2,91% em 2008. A partir de 2011, cai para 0,78%, o que sugere uma melhora no preenchimento dos registros. Em 2024 ela volta a subir, para 1,67%.
+
+```{python}
+# | label: ignorada-concentracao
+con.sql("""
+    SELECT count(*)                                         AS pares_municipio_ano,
+           count(*) FILTER (WHERE ignorada = 0)             AS sem_ignorada,
+           count(*) FILTER (WHERE ignorada > 0.10 * total)  AS acima_de_10pct,
+           count(*) FILTER (WHERE ignorada > 0.30 * total)  AS acima_de_30pct,
+           round(100.0 * sum(ignorada) FILTER (WHERE ignorada > 0.10 * total)
+                 / sum(ignorada), 1)                        AS pct_das_ignoradas_nesses_pares
+    FROM ignorada
+""").df()
+```
+
+```{python}
+# | label: ignorada-maiores
+con.sql("""
+    SELECT municipio, ano, ignorada, total,
+           round(100.0 * ignorada / total, 1) AS pct_ignorada
+    FROM ignorada
+    ORDER BY pct_ignorada DESC
+    LIMIT 8
+""").df()
+```
+
+Ela também se concentra em poucos lugares. Em 2.104 dos 4.774 pares de município e ano, nenhuma idade foi ignorada. Por outro lado, 104 pares têm mais de 10% de idade ignorada e, sozinhos, reúnem 31,2% de todas as idades ignoradas do período. No caso mais extremo, Bom Jesus das Selvas, em 2006, a idade foi ignorada em 283 de 316 nascimentos (89,6%).
+
+```{python}
+# | label: ignorada-porte
+con.sql("""
+    WITH medias AS (
+        SELECT cod_municipio, avg(total) AS media_anual
+        FROM ignorada
+        GROUP BY cod_municipio
+    )
+    SELECT CASE WHEN media_anual < 300  THEN '1. menos de 300 nascimentos por ano'
+                WHEN media_anual < 1000 THEN '2. de 300 a 1.000'
+                ELSE '3. mais de 1.000' END                AS porte,
+           count(DISTINCT cod_municipio)                   AS municipios,
+           round(100.0 * sum(ignorada) / sum(total), 2)    AS pct_ignorada
+    FROM ignorada JOIN medias USING (cod_municipio)
+    GROUP BY porte
+    ORDER BY porte
+""").df()
+```
+
+O tamanho do município não explica a concentração: a taxa de idade ignorada é praticamente a mesma em municípios pequenos, médios e grandes.
+
+Assim, a ausência não é MCAR, porque tem padrão no tempo e se concentra em municípios e anos específicos. Ela depende de variáveis que estão no dado (ano e município), mas não é possível saber se também depende da própria idade da mãe, que é justamente a informação que falta. Por precaução, ela é classificada como MNAR. A decisão é mantê-la como uma categoria própria, sem imputar: redistribuir esses nascimentos entre as faixas suporia que as mães com idade ignorada têm a mesma distribuição de idade das demais, o que o dado não permite verificar. Como a idade ignorada caiu ao longo do período, parte pequena da variação de cada faixa entre 2003 e 2024 pode vir apenas da melhora no preenchimento.
+
+### 3.4 Registro tardio
+
+A variável coletada conta os registros feitos em cartório em cada ano, e não as crianças nascidas naquele ano. Uma criança nascida em 1998 e registrada em 2003 entra na contagem de 2003. O dado coletado não separa esses casos, porque usa o ano de nascimento igual a Total. Para medir o efeito, a mesma tabela 2609 foi consultada para o Maranhão inteiro com o ano de nascimento aberto.
+
+```{python}
+# | label: tardio-serie
+# IBGE/SIDRA, tabela 2609, Maranhão, ano de nascimento aberto (c232), consultada em 05/10/2026:
+# https://apisidra.ibge.gov.br/values/t/2609/n3/21/p/2003/v/217/c2/0/c232/all/c240/0 (um ano por consulta)
+tardio = pd.DataFrame({
+    "ano": range(2003, 2025),
+    "registrados_uf": [
+        181706, 159649, 167298, 151089, 145428, 144413, 132261, 130744, 125985, 119667, 115638,
+        118172, 116407, 113973, 115200, 120027, 113824, 104578, 109641, 100866, 99306, 93969,
+    ],
+    "nascidos_no_proprio_ano": [
+        101693, 97531, 110593, 108049, 105568, 106418, 99163, 104660, 105880, 101210, 102497,
+        106908, 107609, 105142, 107827, 113581, 108414, 100940, 104398, 95521, 94964, 90304,
+    ],
+})
+tardio["nascidos_antes"] = tardio["registrados_uf"] - tardio["nascidos_no_proprio_ano"]
+tardio["pct_nascidos_antes"] = (100 * tardio["nascidos_antes"] / tardio["registrados_uf"]).round(1)
+tardio
+```
+
+Em 2003, 44,0% dos registros do Maranhão eram de crianças nascidas em anos anteriores. Em 2024, eram apenas 3,9%. Assim, entre 2003 e 2024 os registros caíram 48%, de 181.706 para 93.969, mas os registros de crianças nascidas no próprio ano caíram apenas 11%, de 101.693 para 90.304, e ficaram próximos de 100 mil a 110 mil por ano até 2019. A maior parte da queda dos registros vem do fim do registro tardio, e não de uma queda equivalente dos nascimentos.
+
+```{python}
+# | label: tardio-conferencia
+con.register("tardio", tardio)
+con.sql("""
+    WITH soma_municipios AS (
+        SELECT CAST(ano AS INTEGER) AS ano,
+               CAST(sum(CAST(replace(valor, '-', '0') AS INTEGER)) AS BIGINT) AS registrados_municipios
+        FROM bruto
+        WHERE idade_mae = 'Total'
+        GROUP BY ano
+    )
+    SELECT ano, registrados_uf, registrados_municipios,
+           registrados_uf - registrados_municipios AS sem_municipio
+    FROM tardio JOIN soma_municipios USING (ano)
+    ORDER BY ano
+""").df()
+```
+
+A série do estado confere com o dado coletado: a soma dos 217 municípios fica sempre abaixo do total do estado por menos de 1%. A diferença vai de 5 registros, em 2011, a 996, em 2015 (0,86% daquele ano), e corresponde a registros sem município de residência da mãe, que entram no total do estado mas não pertencem a nenhum município. Esses registros ficam de fora de qualquer análise por município.
+
+Assim, a decisão é manter a medida coletada, os nascimentos registrados no ano, que é a usada na pergunta. O registro tardio não é um erro do dado nem pode ser corrigido com o que foi coletado, mas muda a interpretação: os municípios cujos registros mais caíram tendem a ser os que tinham mais registro tardio em 2003, e não necessariamente os que passaram a ter menos nascimentos. Essa ressalva acompanha qualquer análise feita sobre este dado.
+
+### 3.5 Valores atípicos por município
+
+Alguns municípios têm, em certos anos, um total de registros muito diferente do seu normal: Lagoa Grande do Maranhão registrou 1 nascimento em 2012, contra uma mediana de 218 por ano. Para encontrar esses casos, cada ano de um município precisa ser comparado com o próprio município, e não com o estado inteiro, que mistura municípios de tamanhos muito diferentes.
+
+```{python}
+# | label: atipicos-base
+con.sql("""
+    CREATE OR REPLACE VIEW participacao AS
+    WITH totais AS (
+        SELECT cod_municipio, municipio, CAST(ano AS INTEGER) AS ano,
+               CAST(replace(valor, '-', '0') AS INTEGER) AS total
+        FROM bruto
+        WHERE idade_mae = 'Total'
+    ),
+    com_participacao AS (
+        SELECT *, total / sum(total) OVER (PARTITION BY ano) AS participacao
+        FROM totais
+    ),
+    medianas AS (
+        SELECT cod_municipio,
+               median(total)        AS mediana_total,
+               median(participacao) AS mediana_participacao
+        FROM com_participacao
+        GROUP BY cod_municipio
+    )
+    SELECT c.*, m.mediana_total,
+           c.total / m.mediana_total               AS razao_total,
+           c.participacao / m.mediana_participacao AS razao_participacao
+    FROM com_participacao c JOIN medianas m USING (cod_municipio)
+""")
+
+con.sql("""
+    SELECT ano,
+           count(*) FILTER (WHERE razao_total > 2)        AS acima_de_2x_pela_contagem,
+           count(*) FILTER (WHERE razao_participacao > 2) AS acima_de_2x_pela_participacao
+    FROM participacao
+    GROUP BY ano
+    ORDER BY ano
+""").df()
+```
+
+A régua mais simples seria comparar o total de cada ano com a mediana do município. Mas o registro tardio (seção 3.4) inflou os registros de 2003 em todo o estado: por essa régua, 34 municípios aparecem com mais que o dobro do normal em 2003, sem que nada de anormal tenha acontecido com eles. Por isso, a comparação usa a participação do município no total do estado em cada ano. Quando o estado inteiro cai, a participação de cada município se mantém, e só se destaca quem mudou em relação aos demais. Por essa régua, os casos acima do dobro em 2003 caem de 34 para 1.
+
+```{python}
+# | label: atipicos-limiares
+LIMITE_BAIXO, LIMITE_ALTO = 0.25, 3
+
+con.sql("""
+    WITH limiares(limiar, baixo, alto) AS (
+        VALUES ('abaixo de 0,25x ou acima de 3x', 0.25, 3),
+               ('abaixo de 0,2x ou acima de 3x',  0.2,  3),
+               ('abaixo de 0,1x ou acima de 4x',  0.1,  4)
+    )
+    SELECT l.limiar,
+           count(*)                                         AS pares_municipio_ano,
+           count(DISTINCT p.cod_municipio)                  AS municipios,
+           count(*) FILTER (WHERE p.ano IN (2003, 2024))    AS nas_pontas_do_periodo,
+           round(100.0 * sum(p.total)
+                 / (SELECT sum(total) FROM participacao), 2) AS pct_dos_nascimentos
+    FROM limiares l
+    JOIN participacao p
+      ON p.razao_participacao < l.baixo OR p.razao_participacao > l.alto
+    GROUP BY l.limiar
+    ORDER BY pares_municipio_ano DESC
+""").df()
+```
+
+O limiar escolhido é abaixo de 0,25 ou acima de 3 vezes a participação normal do município. Ele sinaliza 63 pares de município e ano, em 27 municípios, que somam apenas 0,13% dos nascimentos registrados. Um limiar mais rígido, como 0,1 e 4 vezes, deixaria passar casos como Maracaçumé em 2024, com 49 registros contra uma mediana de 440, que apareceria como uma das maiores quedas do estado. Por outro lado, o limiar escolhido também sinaliza períodos longos fora do normal, como Belágua de 2021 a 2024, que podem ser mudanças reais e não erros.
+
+```{python}
+# | label: atipicos-lista
+atipicos = con.sql("""
+    SELECT cod_municipio, municipio, ano, total,
+           CAST(mediana_total AS INTEGER)    AS mediana_total,
+           round(razao_participacao, 2)      AS razao_participacao
+    FROM participacao
+    WHERE razao_participacao < $baixo OR razao_participacao > $alto
+    ORDER BY razao_participacao
+""", params={"baixo": LIMITE_BAIXO, "alto": LIMITE_ALTO}).df()
+
+with pd.option_context("display.max_rows", 100):
+    display(atipicos)
+```
+
+Não há uma regra conhecida que explique esses casos: podem ser um cartório fechado em um ano, um mutirão de registros, uma mudança no local em que os registros são feitos ou um erro. Assim, a decisão é colocá-los em quarentena: cada município e ano sinalizado sai da tabela tratada, com as suas dez faixas de idade, e fica guardado com o motivo, para ser investigado depois. Como apenas 0,13% dos nascimentos estão nesses casos, a quarentena quase não reduz o volume do dado, mas impede que eles distorçam a comparação entre 2003 e 2024.
+
+### 3.6 Tabela de decisão
+
+A tabela reúne as decisões das seções anteriores. A coluna "% afetado" substitui "% ausente" porque só a idade ignorada é uma ausência; os demais pontos são de formato, estrutura, atualidade ou valores atípicos, e o tipo de cada um aparece na terceira coluna.
+
+| coluna | % afetado | tipo | estratégia | justificativa |
+|:---|:---|:---|:---|:---|
+| `ano`, `valor` | 100% das linhas | formato: chegaram como texto | converter para inteiro | Como texto, `valor` é ordenado alfabeticamente (mínimo `-`, máximo `999`) e não permite contas |
+| `valor` (símbolo `-`) | 19,7% das células | não é ausência: zero escrito como símbolo | converter em 0, com a coluna indicadora `valor_era_traco` | Nunca aparece no Total e, contando `-` como zero, as faixas somam o Total em todos os 4.774 casos |
+| `idade_mae` (níveis) | 46 categorias | estrutura: categorias sobrepostas | manter as 10 faixas, descartar as idades simples e guardar o Total na coluna `total_municipio_ano` | Somar todas as categorias conta cada nascimento quase três vezes; as faixas já cobrem todos os nascimentos sem repetição |
+| `idade_mae` = Ignorada | 1,32% dos nascimentos | MNAR | manter como categoria, sem imputar | Tem padrão no tempo (2,02% até 2010, 0,78% depois) e se concentra em poucos municípios; não há como estimar a idade que falta |
+| `valor` (registro tardio) | 44,0% dos registros em 2003 e 3,9% em 2024 | atualidade | manter a medida e registrar a ressalva | É a medida da pergunta; o registro tardio explica a maior parte da queda (registros −48%, nascidos no próprio ano −11%) e não pode ser corrigido com o dado coletado |
+| registros sem município | de 5 a 996 por ano (menos de 1%) | completude | nenhuma: ficam fora da análise por município | Não pertencem a nenhum município e são menos de 1% dos registros de cada ano |
+| total do município no ano | 63 pares de município e ano (0,13% dos nascimentos) | valor atípico sem regra conhecida | quarentena do município e ano inteiros | Participação no estado abaixo de 0,25 ou acima de 3 vezes a normal do município, sem causa conhecida |
+| 8 colunas constantes | 8 de 17 colunas | sem informação | descartar | Têm o mesmo valor em todas as linhas e não diferenciam nenhum registro |
+| todas (duplicatas) | 0 linhas | sem problema | remoção preventiva de cópias exatas | Nenhuma linha se repete, nem por inteiro nem pela chave |
+| todas (nulos) | 0 colunas | sem problema | nenhuma | Nenhuma das 17 colunas tem valores nulos |
+
+## 4. Tratamento
+
+As decisões da tabela são aplicadas em quatro passos, cada um seguido das verificações que garantem que ele fez o que devia. Nenhum valor é imputado.
+
+**Formato.** O `-` vira 0, com a coluna `valor_era_traco` registrando quais valores vieram assim; `valor` e `ano` passam a ser inteiros; e o sufixo " - MA" sai do nome do município.
+
+```{python}
+# | label: tratamento-formato
+tratado = df.copy()
+tratado["valor_era_traco"] = tratado["valor"] == "-"
+tratado["nascidos"] = tratado["valor"].replace("-", "0").astype(int)
+tratado["ano"] = tratado["ano"].astype(int)
+tratado["municipio"] = tratado["municipio"].str.removesuffix(" - MA")
+
+assert pd.api.types.is_integer_dtype(tratado["nascidos"]) and (tratado["nascidos"] >= 0).all()
+assert tratado["valor_era_traco"].sum() == (df["valor"] == "-").sum()
+assert (tratado.loc[tratado["valor_era_traco"], "nascidos"] == 0).all()
+assert not tratado["municipio"].str.endswith(" - MA").any()
+```
+
+**Estrutura.** O Total de cada município e ano vira a coluna `total_municipio_ano`, e ficam apenas as dez faixas de idade. A última verificação confere, em cada município e ano, que a soma das faixas é igual ao total.
+
+```{python}
+# | label: tratamento-estrutura
+total = (
+    tratado.loc[tratado["idade_mae"] == "Total", ["cod_municipio", "ano", "nascidos"]]
+    .rename(columns={"nascidos": "total_municipio_ano"})
+)
+tratado = (
+    tratado[tratado["idade_mae"].isin(FAIXAS)]
+    .merge(total, on=["cod_municipio", "ano"], how="left", validate="many_to_one")
+    .rename(columns={"idade_mae": "faixa_idade_mae"})
+)
+
+assert set(tratado["faixa_idade_mae"]) == set(FAIXAS)
+
+combinacoes = tratado["cod_municipio"].nunique() * tratado["ano"].nunique() * len(FAIXAS)
+assert len(tratado) == combinacoes, f"faltam combinações: {len(tratado)} de {combinacoes}"
+
+por_par = tratado.groupby(["cod_municipio", "ano"]).agg(
+    soma=("nascidos", "sum"), total=("total_municipio_ano", "first")
+)
+assert (por_par["soma"] == por_par["total"]).all(), "soma das faixas difere do total"
+```
+
+**Colunas.** Saem as oito colunas constantes e as que ficaram redundantes (`cod_ano`, que repete `ano`, e `cod_idade_mae`).
+
+```{python}
+# | label: tratamento-colunas
+COLUNAS = [
+    "cod_municipio", "municipio", "ano", "faixa_idade_mae",
+    "nascidos", "valor_era_traco", "total_municipio_ano",
+]
+tratado = tratado[COLUNAS]
+
+assert list(tratado.columns) == COLUNAS
+```
+
+**Valores atípicos.** Os municípios e anos sinalizados na seção 3.5 saem da tabela tratada, com as suas dez faixas, e são separados para a quarentena.
+
+```{python}
+# | label: tratamento-atipicos
+sinalizados = atipicos[["cod_municipio", "ano"]].astype({"ano": int})
+marcado = tratado.merge(sinalizados, on=["cod_municipio", "ano"], how="left", indicator=True)
+em_quarentena = marcado["_merge"] == "both"
+
+quarentena = marcado[em_quarentena].drop(columns="_merge").reset_index(drop=True)
+tratado = marcado[~em_quarentena].drop(columns="_merge").reset_index(drop=True)
+
+assert len(quarentena) == len(sinalizados) * len(FAIXAS)
+assert len(tratado) + len(quarentena) == combinacoes
+pares_tratados = set(zip(tratado["cod_municipio"], tratado["ano"]))
+pares_quarentena = set(zip(quarentena["cod_municipio"], quarentena["ano"]))
+assert not pares_tratados & pares_quarentena, "município e ano nas duas tabelas"
+
+print(f"tabela tratada: {len(tratado)} linhas | quarentena: {len(quarentena)} linhas")
+tratado.head(10)
+```
+
+A tabela tratada tem uma linha por município, ano e faixa de idade da mãe, com os nascimentos registrados como número inteiro. Das 47.740 linhas das dez faixas, 47.110 seguem na tabela tratada e 630 vão para a quarentena (63 pares de município e ano, com as dez faixas cada).
+
+## 5. Quarentena
+
+Os municípios e anos com participação atípica, separados no tratamento, são gravados com a linha inteira, o motivo, a evidência que levou à quarentena (a razão de participação e a mediana do município), a coleta de origem e o momento da detecção.
+
+```{python}
+# | label: quarentena
+ARQUIVO_QUARENTENA = Path("data/quarentena/atipicos-municipio-ano.csv")
+
+evidencia = atipicos[["cod_municipio", "ano", "mediana_total", "razao_participacao"]].astype({"ano": int})
+registro = (
+    quarentena
+    .merge(evidencia, on=["cod_municipio", "ano"], how="left", validate="many_to_one")
+    .assign(
+        motivo="participacao_atipica_no_municipio",
+        coleta=COLETA.name,
+        detectado_em=pd.Timestamp.now(tz="UTC").isoformat(timespec="seconds"),
+    )
+)
+
+ARQUIVO_QUARENTENA.parent.mkdir(parents=True, exist_ok=True)
+registro.to_csv(ARQUIVO_QUARENTENA, index=False, encoding="utf-8-sig")
+
+relido = pd.read_csv(ARQUIVO_QUARENTENA, dtype={"cod_municipio": str}, encoding="utf-8-sig")
+assert len(relido) == len(quarentena)
+assert relido["motivo"].notna().all() and relido["razao_participacao"].notna().all()
+
+print(f"{len(relido)} linhas gravadas em {ARQUIVO_QUARENTENA}")
+relido.head(10)
+```
+
+O arquivo guarda 630 linhas, as dez faixas de cada um dos 63 pares de município e ano sinalizados. Essas linhas não foram descartadas: continuam disponíveis, com o motivo e a evidência, para serem investigadas e, se a causa for entendida, devolvidas à análise.
+
+## 6. Erro da imputação, por mascaramento
+
+Não houve imputação neste dado, e por isso não há erro de imputação a estimar. O `-` foi convertido em zero porque é zero, como mostrou a seção 3.1, e não por estimativa; a idade ignorada foi mantida como categoria, sem redistribuir os nascimentos entre as faixas; e os valores atípicos foram para a quarentena, sem correção. A verificação abaixo compara cada valor das tabelas tratada e de quarentena com o valor bruto correspondente e confirma que nenhum foi alterado além da conversão do `-`.
+
+```{python}
+# | label: sem-imputacao
+final = pd.concat([tratado, quarentena], ignore_index=True)
+original = (
+    df[df["idade_mae"].isin(FAIXAS)]
+    .assign(
+        ano=lambda d: d["ano"].astype(int),
+        valor_bruto=lambda d: d["valor"].replace("-", "0").astype(int),
+    )
+    .rename(columns={"idade_mae": "faixa_idade_mae"})
+    [["cod_municipio", "ano", "faixa_idade_mae", "valor_bruto"]]
+)
+comparacao = final.merge(original, on=["cod_municipio", "ano", "faixa_idade_mae"], validate="one_to_one")
+diferentes = int((comparacao["nascidos"] != comparacao["valor_bruto"]).sum())
+
+assert len(comparacao) == len(final)
+assert diferentes == 0, f"{diferentes} valores diferentes do bruto"
+print(f"valores comparados: {len(comparacao)} | diferentes do valor bruto: {diferentes}")
+```
+
+## Fechamento
+
+Todos os números da tabela tratada vêm diretamente do IBGE: nenhum valor foi estimado, e a única conversão, do `-` para zero, está marcada na coluna `valor_era_traco`. O que não é medida, mas decisão da equipe, são os 63 pares de município e ano mantidos em quarentena e a idade ignorada mantida como uma categoria própria. Por fim, os números contam registros feitos em cartório, e não nascimentos: a queda entre 2003 e 2024 se deve em grande parte ao fim do registro tardio, e deve ser lida com essa ressalva.
