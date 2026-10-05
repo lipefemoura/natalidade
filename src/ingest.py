@@ -1,172 +1,138 @@
+"""Coleta nascidos vivos registrados por município do Maranhão (IBGE/SIDRA, tabela 2609)."""
+
 import json
-import os
-from datetime import date
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
-from time import sleep
 
 import requests
-from dotenv import load_dotenv
 
-
-load_dotenv()
 
 # ============================================================
 # CONFIGURAÇÕES
 # ============================================================
 
-UF_CODIGO = os.environ.get("UF_CODIGO", "21")
-
-ANO_INICIAL = 2003
+UF_CODIGO = "21"  # Maranhão
+ANO_INICIAL = 2003  # primeiro ano da tabela 2609
 ANO_FINAL = 2024
 
-TABELA = "2609"
-VARIAVEL = "217"
-
+FONTE = "IBGE/SIDRA - Tabela 2609 (Estatísticas do Registro Civil)"
 URL_BASE = "https://apisidra.ibge.gov.br/values"
+DIR_RAW = Path("data/raw/ibge_sidra_2609")
 
-# Consulta:
-# n6 = municípios
-# all = todos os municípios
-# p = período
-# v = variável
-# c = classificações
-#
-# D4 = sexo
-# D5 = ano de nascimento
-# D6 = idade da mãe
-
-DADOS_RAW = Path("data/raw/ibge_nascimentos")
+MAX_TENTATIVAS = 4
+TIMEOUT = 120
+PAUSA_ENTRE_ANOS = 1
+HEADERS = {"User-Agent": "natalidade-ICD-IFMA/0.1 (projeto academico)"}
 
 
 # ============================================================
-# FUNÇÃO DE CONSULTA
+# CONSULTA
 # ============================================================
 
-def buscar_dados(ano: int) -> list:
-    """Consulta os dados da Tabela 2609 para um determinado ano."""
+def montar_url(ano: int) -> str:
+    """Monta a URL de consulta de um ano.
 
-    url = f"{URL_BASE}/t/{TABELA}/n6/all/p/{ano}"
+    Trechos da URL:
+        t/2609          tabela 2609 (Estatísticas do Registro Civil)
+        n6/in n3 21     municípios (n6) da UF 21 (Maranhão)
+        p/{ano}         ano consultado
+        v/217           nascidos vivos registrados no ano
+        c2/0            sexo: total
+        c232/0          ano de nascimento: total
+        c240/all        idade da mãe: todas as categorias
 
-    params = {
-        "v": VARIAVEL,
-        "c782": "0",
-        "c783": "0",
-        "c784": "all",
-    }
+    Os parâmetros ficam no caminho da URL porque o SIDRA ignora, sem erro,
+    parâmetros enviados na query string (?c240=all).
 
-    for tentativa in range(1, 4):
-        try:
-            resposta = requests.get(
-                url,
-                params=params,
-                timeout=120,
-            )
-
-            if resposta.status_code == 429:
-                espera = tentativa * 5
-                print(
-                    f"IBGE retornou 429 (muitas requisições). "
-                    f"Aguardando {espera}s..."
-                )
-                sleep(espera)
-                continue
-
-            if resposta.status_code >= 500:
-                espera = tentativa * 5
-                print(
-                    f"Servidor do IBGE retornou {resposta.status_code}. "
-                    f"Tentativa {tentativa}/3..."
-                )
-
-                if tentativa < 3:
-                    sleep(espera)
-                    continue
-
-            resposta.raise_for_status()
-
-            dados = resposta.json()
-
-            if not isinstance(dados, list):
-                raise RuntimeError(
-                    f"Resposta inesperada da API para o ano {ano}."
-                )
-
-            return dados
-
-        except requests.RequestException as erro:
-            if tentativa < 3:
-                espera = tentativa * 5
-                print(
-                    f"Erro de conexão para {ano}. "
-                    f"Tentando novamente em {espera}s..."
-                )
-                sleep(espera)
-            else:
-                raise RuntimeError(
-                    f"Não foi possível consultar o IBGE para o ano {ano}."
-                ) from erro
-
-    raise RuntimeError(
-        f"Não foi possível consultar o IBGE para o ano {ano}."
+    É feita uma chamada por ano porque a API recusa pedidos acima de
+    50.000 valores, e um ano do Maranhão tem cerca de 10 mil.
+    """
+    return (
+        f"{URL_BASE}/t/2609/n6/in%20n3%20{UF_CODIGO}/p/{ano}"
+        f"/v/217/c2/0/c232/0/c240/all"
     )
 
 
-# ============================================================
-# FILTRO DOS MUNICÍPIOS DO MARANHÃO
-# ============================================================
+def segundos_retry_after(resposta: requests.Response, padrao: int) -> int:
+    """Retorna o Retry-After em segundos, ou o padrão se ausente ou em formato de data."""
+    valor = resposta.headers.get("Retry-After", "")
+    return int(valor) if valor.isdigit() else padrao
 
-def filtrar_maranhao(dados: list) -> list:
+
+def requisitar(url: str) -> list[dict]:
+    """Executa a requisição com tratamento diferenciado de erros.
+
+    401/403 e demais 4xx: encerram sem nova tentativa.
+    429, 5xx e falhas de rede: nova tentativa com backoff exponencial.
     """
-    Mantém somente os municípios do Maranhão.
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        espera = 2 ** tentativa  # 2, 4, 8 s
 
-    Os códigos IBGE dos municípios do Maranhão começam com 21.
+        try:
+            resposta = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        except (requests.ConnectionError, requests.Timeout) as erro:
+            motivo = f"falha de rede ({type(erro).__name__})"
+        else:
+            status = resposta.status_code
+
+            if status == 200:
+                try:
+                    return resposta.json()
+                except requests.JSONDecodeError as erro:
+                    raise RuntimeError(
+                        f"Resposta 200 sem JSON válido: {resposta.text[:200]}"
+                    ) from erro
+
+            if status in (401, 403):
+                raise PermissionError(
+                    f"Acesso negado ({status}). O SIDRA não usa chave, então o "
+                    f"provável motivo é bloqueio da Cloudflare: repetir agora não resolve."
+                )
+
+            if status == 429:
+                motivo = "limite de requisições (429)"
+                espera = segundos_retry_after(resposta, espera)
+            elif status >= 500:
+                motivo = f"erro do servidor ({status})"
+            else:
+                raise ValueError(f"Consulta recusada ({status}): {resposta.text[:200]}")
+
+        if tentativa == MAX_TENTATIVAS:
+            break
+        print(f"    {motivo}; tentativa {tentativa}/{MAX_TENTATIVAS}, aguardando {espera}s...")
+        time.sleep(espera)
+
+    raise RuntimeError(f"Desisti após {MAX_TENTATIVAS} tentativas ({motivo}): {url}")
+
+
+def validar(dados: list, ano: int) -> int:
+    """Valida a resposta e retorna o número de registros.
+
+    A API responde 200 com apenas o cabeçalho quando o período não tem dados.
     """
+    if not isinstance(dados, list) or not dados:
+        raise RuntimeError(f"Ano {ano}: resposta em formato inesperado.")
 
-    if not dados:
-        return []
-
-    cabecalho = dados[0]
-
-    registros = []
-
-    for registro in dados[1:]:
-        codigo_municipio = registro.get("D1C", "")
-
-        if codigo_municipio.startswith(UF_CODIGO):
-            registros.append(registro)
-
-    return [cabecalho] + registros
+    registros = len(dados) - 1  # o primeiro item é o cabeçalho
+    if registros == 0:
+        raise RuntimeError(f"Ano {ano}: a API devolveu só o cabeçalho, sem registros.")
+    return registros
 
 
 # ============================================================
 # SALVAMENTO
 # ============================================================
 
-def salvar_dados(dados_por_ano: dict) -> Path:
-    """Salva a resposta bruta da API em JSON."""
+def salvar(envelope: dict, destino: Path) -> None:
 
-    hoje = date.today().isoformat()
-
-    pasta_saida = DADOS_RAW / hoje
-    pasta_saida.mkdir(parents=True, exist_ok=True)
-
-    arquivo_saida = (
-        pasta_saida
-        / f"nascimentos_tabela{TABELA}_uf{UF_CODIGO}.json"
-    )
-
-    with arquivo_saida.open(
-        "w",
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    temporario = destino.with_suffix(".tmp")
+    temporario.write_text(
+        json.dumps(envelope, ensure_ascii=False, indent=2),
         encoding="utf-8",
-    ) as arquivo:
-        json.dump(
-            dados_por_ano,
-            arquivo,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    return arquivo_saida
+    )
+    temporario.replace(destino)
 
 
 # ============================================================
@@ -174,55 +140,41 @@ def salvar_dados(dados_por_ano: dict) -> Path:
 # ============================================================
 
 def main() -> None:
-    print("=" * 60)
-    print("COLETA DE NASCIDOS VIVOS - IBGE/SIDRA")
-    print("=" * 60)
-    print(f"UF: {UF_CODIGO} - Maranhão")
-    print(f"Anos: {ANO_INICIAL} a {ANO_FINAL}")
-    print(f"Tabela: {TABELA}")
-    print(f"Variável: {VARIAVEL} - Nascidos vivos registrados no ano")
-    print("Nível territorial: Município")
-    print("Idade da mãe: todas as categorias")
-    print("=" * 60)
-    print()
+    pasta = DIR_RAW / date.today().isoformat()
+    total, baixados = 0, 0
 
-    dados_por_ano = {}
+    print(f"{FONTE}, UF {UF_CODIGO}, {ANO_INICIAL} a {ANO_FINAL}")
 
-    anos = range(ANO_INICIAL, ANO_FINAL + 1)
-    total_anos = len(list(anos))
+    for ano in range(ANO_INICIAL, ANO_FINAL + 1):
+        destino = pasta / f"uf{UF_CODIGO}_{ano}.json"
 
-    for indice, ano in enumerate(anos, start=1):
-        print(
-            f"[{indice}/{total_anos}] "
-            f"Coletando ano {ano}..."
+        if destino.exists():  # idempotência
+            registros = json.loads(destino.read_text(encoding="utf-8"))["registros"]
+            print(f"  {ano}: já coletado hoje ({registros} registros)")
+            total += registros
+            continue
+
+        url = montar_url(ano)
+        dados = requisitar(url)
+        registros = validar(dados, ano)
+
+        salvar(
+            {
+                "fonte": FONTE,
+                "url": url,
+                "coletado_em": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "registros": registros,
+                "dado": dados,  # resposta original da API
+            },
+            destino,
         )
+        print(f"  {ano}: {registros} registros")
+        total += registros
+        baixados += 1
+        time.sleep(PAUSA_ENTRE_ANOS)
 
-        dados = buscar_dados(ano)
-
-        dados_ma = filtrar_maranhao(dados)
-
-        quantidade = len(dados_ma) - 1
-
-        print(
-            f"  ✓ Registros encontrados para o Maranhão: "
-            f"{quantidade}"
-        )
-
-        dados_por_ano[str(ano)] = dados_ma
-
-        # Pequena pausa para evitar excesso de requisições
-        if ano != ANO_FINAL:
-            sleep(1)
-
-    arquivo = salvar_dados(dados_por_ano)
-
-    print()
-    print("=" * 60)
-    print("COLETA CONCLUÍDA")
-    print("=" * 60)
-    print(f"Arquivo salvo em:")
-    print(arquivo)
-    print("=" * 60)
+    anos = ANO_FINAL - ANO_INICIAL + 1
+    print(f"\n{total} registros de {anos} anos ({baixados} baixados agora) em {pasta}")
 
 
 if __name__ == "__main__":
