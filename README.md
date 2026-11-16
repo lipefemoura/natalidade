@@ -71,3 +71,62 @@ src/ingest.py      da fonte para data/raw/
 src/transform.py   de data/raw/ para data/trusted/
 diagnostico.qmd    diagnóstico do dado bruto
 ```
+
+## Etapa 2 — primeira metade
+
+Escopo adotado a partir dos desafios das aulas: **1. exploração; 2. Tidy Data e
+flat table; 3. desenho dimensional**. Os materiais locais contêm exercícios
+teóricos da Etapa 2, não um enunciado prático próprio. Ainda faltam **4. construir
+gold; 5. análise estatística; 6. síntese e relatório final**. Não há algoritmo
+treinado, confirmação de hipótese ou ranking final de quedas nesta entrega parcial.
+
+Depois de executar a primeira etapa, na raiz do projeto:
+
+```bash
+uv sync
+uv run python -m src.prepare
+uv run python -m unittest discover -s tests -v
+uv run quarto render exploracao.qmd
+uv run quarto render tidy.qmd
+uv run quarto render estrela.qmd
+```
+
+| Artefato | Finalidade |
+|---|---|
+| `src/prepare.py` | Validação do grão, exploração 2003–2020, coorte constante, pivot/melt reversível e flat table temporal |
+| `exploracao.qmd` | Cobertura, evolução, distribuições, massa no zero, idade ignorada e suspeita de São Luís em 2003 |
+| `tidy.qmd` | Justificativa do formato, demonstração de melt e definição de X/y |
+| `estrela.qmd` | Processo, granularidade, dimensões, medidas, agregada proposta e verificações para a futura carga |
+| `tests/test_prepare.py` | Testes sem rede de cobertura, contagens, round-trip e seleção temporal dos atributos |
+
+O comando de preparação grava nove Parquets em `data/analysis/` (fora do Git):
+série anual, perfil de faixas, idade ignorada, totais exploratórios, tabela larga,
+tabela longa, flat table, `X` e `y`. Todos são recalculáveis, e os arquivos são
+relidos e comparados depois da gravação. Esta pasta **não é a camada gold**.
+
+Na flat table, cada linha é um município completo em 2018–2021. `X` tem cinco
+atributos calculados somente em 2018–2020; `y` indica se os registros de 2021
+ficaram abaixo da média anual desse período. Nome, código e contagem futura
+ficam fora de `X`. A ordem das linhas é compartilhada; a flat table preserva
+identificação e contagem do alvo para auditoria. Não há treinamento.
+
+### Cuidados de interpretação
+
+- Lacunas de quarentena **não são zeros**. A cobertura anual varia; por isso a
+	exploração também acompanha os mesmos municípios em todos os anos.
+- `total_municipio_ano` repete-se dez vezes na trusted: somá-lo sobre as faixas
+	multiplica o total por dez. As análises somam `nascidos`.
+- As somas municipais aprovadas não equivalem ao total oficial do estado.
+- Os anos 2022–2024 ficam fora da nova exploração, mas não são holdout intocado:
+	o diagnóstico anterior já os examinou e a quarentena usa toda a série. Não
+	alegar confirmação independente nem ausência de vazamento global.
+- O relatório anterior apontou a concentração de São Luís/2003 em 25–29 anos
+	como suspeita ainda não resolvida. Ela é reavaliada, sem correção automática.
+- Registros tardios, idade ignorada, pandemia e seleção pela quarentena
+	permanecem limitações; nenhuma variação é interpretada como efeito causal.
+
+Os materiais de aula em `/docs/`, o roteiro privado e os HTML renderizados
+ficam fora do versionamento. Os QMD, código e testes são os artefatos públicos
+reproduzíveis. Esta etapa foi preparada com auxílio do GitHub Copilot para
+leitura dos materiais, implementação e validação; decisões analíticas ainda
+dependem de revisão da equipe.

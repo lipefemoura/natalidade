@@ -1334,6 +1334,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "jupyter" },
+    { name = "matplotlib" },
     { name = "missingno" },
     { name = "quarto-cli" },
 ]
@@ -1351,6 +1352,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "missingno", specifier = ">=0.5.2" },
     { name = "quarto-cli", specifier = ">=1.10.18" },
 ]

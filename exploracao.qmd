@@ -1,0 +1,192 @@
+---
+title: "Exploração dos registros de nascidos vivos"
+subtitle: "Etapa 2 — primeiro marco; período exploratório 2003–2020"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    include-in-header:
+      text: |
+        <style>
+        .cell-output-display img { max-width: 100%; height: auto; }
+        </style>
+execute:
+  echo: true
+  warning: false
+---
+
+## Pergunta e limites
+
+**Entre 2003 e 2024, em que municípios do Maranhão e em que faixas de idade da
+mãe os nascimentos registrados mais caíram?** Esta primeira metade prepara a
+resposta; não apresenta ainda o ranking das pontas nem uma conclusão estatística.
+
+Uma observação é a contagem de registros em um município, ano e faixa de idade
+da mãe. Não é uma criança individual, uma taxa de natalidade ou uma contagem de
+nascimentos ocorridos naquele ano. Não há denominador populacional para calcular
+taxas. A redução do registro tardio é uma explicação rival central, já
+documentada na Etapa 1. “Ignorada” continua sendo falta de informação sobre a
+idade, não uma idade nem um zero.
+
+As análises novas abaixo usam somente **2003–2020**. Os anos 2022–2024 ficam
+fora delas, mas já foram examinados no diagnóstico anterior: não constituem
+confirmação independente. A quarentena também foi definida com toda a série.
+
+```{python}
+# | label: setup
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import display
+from src.prepare import TRUSTED, validar_base, explorar
+
+plt.rcParams.update({"figure.figsize": (10, 4.5), "axes.spines.top": False,
+                     "axes.spines.right": False, "font.size": 10})
+base = validar_base(pd.read_parquet(TRUSTED))
+resultados = explorar(base)
+serie = resultados["serie_anual"]
+faixas = resultados["perfil_faixas"]
+totais = resultados["totais_exploracao"]
+print(f"Trusted validada: {len(base):,} linhas; {base.cod_municipio.nunique()} municípios.")
+print("Os valores a seguir são recalculados; não foram copiados do relatório.")
+```
+
+## Cobertura: ausência não é zero
+
+O tratamento retirou municípios-ano inteiros, portanto o conjunto de municípios
+muda a cada ano. A soma dos aprovados **não é o total oficial do Maranhão**:
+exclui quarentena e registros sem município. A coorte constante mantém apenas
+municípios com todos os 18 anos de exploração, para separar parte do efeito de
+composição. Essa seleção também pode introduzir viés; não corrige a quarentena.
+
+```{python}
+# | label: cobertura
+# | out-width: "100%"
+display(serie)
+print(f"Coorte constante: {int(serie.municipios_coorte.iloc[0])} municípios de 2003 a 2020.")
+assert serie.municipios_coorte.nunique() == 1
+fig, ax = plt.subplots()
+ax.plot(serie.ano, serie.municipios_observados, marker="o", color="#087f8c", label="Aprovados no ano")
+ax.axhline(int(serie.municipios_coorte.iloc[0]), color="#c35b27", linestyle="--", label="Coorte constante")
+ax.set(xlabel="Ano do registro", ylabel="Municípios observados", title="A cobertura muda após a quarentena")
+ax.set_xticks(range(2003, 2021, 2))
+ax.legend()
+plt.tight_layout()
+plt.show()
+```
+
+## Evolução descritiva com denominador explícito
+
+```{python}
+# | label: serie-registros
+# | out-width: "100%"
+fig, ax = plt.subplots()
+ax.plot(serie.ano, serie.registros_aprovados, color="#087f8c", label="Cobertura variável")
+ax.plot(serie.ano, serie.registros_coorte, color="#c35b27", label="Coorte constante")
+ax.set(xlabel="Ano do registro", ylabel="Registros em cartório", title="Registros aprovados, não total oficial UF")
+ax.set_xticks(range(2003, 2021, 2))
+ax.ticklabel_format(axis="y", style="plain")
+ax.legend()
+plt.tight_layout()
+plt.show()
+for coluna in ["registros_aprovados", "registros_coorte"]:
+    variacao = 100 * (serie[coluna].iloc[-1] / serie[coluna].iloc[0] - 1)
+    print(f"2003–2020 | {coluna}: {variacao:+.2f}%")
+```
+
+A comparação entre as duas curvas verifica sensibilidade à cobertura, não
+causalidade. Nenhuma delas elimina o registro tardio. Não usar essa variação como
+estimativa de queda da fecundidade ou como previsão do futuro.
+
+## Forma da distribuição e massa no zero
+
+A distribuição dos totais municipais mistura portes diferentes. Histograma e
+boxplot se complementam; a mediana sozinha não caracteriza os 217 municípios.
+A escala logarítmica permite enxergar o corpo da distribuição sem remover os
+municípios maiores. Os totais positivos são identificados explicitamente.
+
+```{python}
+# | label: distribuicoes
+# | out-width: "100%"
+display(totais.registros.describe().to_frame("Registros por município-ano, 2003–2020"))
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+positivos = totais.loc[totais.registros.gt(0), "registros"]
+import numpy as np
+axes[0].hist(positivos, bins=np.geomspace(positivos.min(), positivos.max(), 25), color="#087f8c", edgecolor="white")
+axes[0].set_xscale("log")
+axes[0].set(xlabel="Registros (escala log)", ylabel="Municípios-ano", title="Distribuição dos totais positivos")
+axes[1].boxplot(positivos)
+axes[1].set_yscale("log")
+axes[1].set(ylabel="Registros (escala log)", title="Resumo, sem excluir pontos extremos", xticks=[])
+plt.tight_layout()
+plt.show()
+print(f"Totais iguais a zero: {totais.registros.eq(0).sum()} de {len(totais)} municípios-ano.")
+display(faixas.round(2))
+fig, ax = plt.subplots()
+ax.barh(faixas.faixa_idade_mae, faixas.pct_zeros, color="#087f8c")
+ax.invert_yaxis()
+ax.set(xlabel="Células com zero (%)", title="Zero registrado não é dado ausente", xlim=(0, 100))
+plt.tight_layout()
+plt.show()
+```
+
+O denominador de `pct_zeros` é o número de células aprovadas da faixa, não o
+número de nascimentos. Zeros são mantidos; não se imputam e não desaparecem
+silenciosamente ao usar log. A participação de cada faixa usa registros como
+denominador, uma pergunta diferente.
+
+## Qualidade da informação de idade
+
+```{python}
+# | label: ignorada
+# | out-width: "100%"
+ignorada = resultados["idade_ignorada"]
+display(ignorada.round(3))
+fig, ax = plt.subplots()
+ax.plot(ignorada.ano, ignorada.participacao_pct, marker="o", color="#c35b27")
+ax.set(xlabel="Ano do registro", ylabel="Registros com idade ignorada (%)",
+       title="Razão das somas nos municípios aprovados de cada ano")
+ax.set_xticks(range(2003, 2021, 2))
+plt.tight_layout()
+plt.show()
+```
+
+Mudanças nessa participação podem alterar as contagens das faixas conhecidas
+sem uma mudança equivalente na idade das mães. Uma análise futura deve comparar
+resultados com e sem “Ignorada”, sempre explicitando a troca de denominador,
+sem redistribuir a categoria automaticamente.
+
+## Avaliação intermediária
+
+### Suspeita herdada: São Luís em 2003
+
+O relatório anterior deixou uma combinação sem explicação: a concentração de
+São Luís em 2003 na faixa de 25 a 29 anos. A regra de quarentena olha o total,
+portanto pode não detectar distribuição etária suspeita. A conferência abaixo
+retoma o caso sem corrigi-lo automaticamente.
+
+```{python}
+# | label: sao-luis
+sao_luis = base[base.cod_municipio.eq("2111300") & base.ano.le(2020)]
+denominador = sao_luis.groupby("ano").nascidos.sum().rename("total")
+suspeita = (
+  sao_luis[sao_luis.faixa_idade_mae.eq("25 a 29 anos")][["ano", "nascidos"]]
+  .merge(denominador, on="ano", validate="one_to_one")
+)
+suspeita["participacao_pct"] = 100 * suspeita.nascidos / suspeita.total
+display(suspeita.round(2))
+```
+
+Uma concentração atípica é evidência para investigação, não prova de erro.
+Qualquer ranking futuro de quedas por faixa deve mostrar a sensibilidade a
+essa combinação, sem apagar São Luís ou alterar o valor sem justificativa.
+
+- Granularidade, chave e dez faixas por município-ano foram verificadas antes
+  das contas; a soma dos totais repetidos não foi usada como medida.
+- A série com cobertura variável foi confrontada com uma coorte constante.
+- Massa no zero, assimetria de porte e informação de idade foram examinadas.
+- Próximos marcos: Tidy/flat table e desenho dimensional; depois, gold,
+  análise de sensibilidade, inferência apropriada e resposta final à pergunta.
+- Ainda não há hipótese confirmada, efeito causal ou recomendação de política
+  pública. O recorte 2003–2024 e o efeito do registro tardio exigem a continuação.

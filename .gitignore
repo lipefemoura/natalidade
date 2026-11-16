@@ -1,6 +1,10 @@
 # Credenciais
 .env
 
+# Material de referência e planejamento local
+/docs/
+/roteiro-atividade-2.md
+
 # Ambiente virtual
 .venv/
 
@@ -17,6 +21,14 @@ data/quarentena/
 .quarto/
 diagnostico.html
 diagnostico_files/
+/exploracao.html
+/exploracao_files/
+/tidy.html
+/tidy_files/
+/estrela.html
+/estrela_files/
+/data/analysis/
+/data/gold/
 
 # Python-generated files
 __pycache__/

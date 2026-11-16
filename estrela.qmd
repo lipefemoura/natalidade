@@ -1,0 +1,167 @@
+---
+title: "Desenho dimensional dos registros de nascidos vivos"
+subtitle: "Etapa 2 — terceiro marco; modelo especificado, ainda não construído"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  echo: true
+---
+
+## 1. Processo
+
+O processo observado é **registrar nascidos vivos em cartório**, conforme as
+Estatísticas do Registro Civil do IBGE. O município é o recorte territorial
+da tabela coletada, não o local de ocorrência de cada parto. A fonte só
+disponibiliza contagens agregadas neste projeto: não há identificador de criança,
+cartório ou evento individual.
+
+## 2. Granularidade, antes das colunas
+
+**Uma linha da fato central representa a contagem de registros de um município
+do Maranhão em um ano e uma faixa de idade da mãe.** É a granularidade mais
+fina mantida na trusted, não uma fato transacional por nascimento. A extração
+original tinha idades simples, deliberadamente descartadas na primeira fase;
+não é possível recuperá-las a partir das faixas.
+
+Uma agregada futura terá **uma linha por município e ano**, somando as dez
+faixas da fato central. A coluna `total_municipio_ano` da trusted não desce para
+a fato central: ela repete a mesma medida dez vezes.
+
+## 3. Diagnósticos que justificam o desenho
+
+```{python}
+# | label: diagnosticos-estrela
+import duckdb
+import pandas as pd
+from IPython.display import display
+from src.prepare import TRUSTED, validar_base
+
+base = validar_base(pd.read_parquet(TRUSTED))
+con = duckdb.connect()
+con.register("trusted", base)
+# Diagnóstico de modelagem só no recorte exploratório.
+con.execute("CREATE VIEW exploratoria AS SELECT * FROM trusted WHERE ano <= 2020")
+display(con.sql("""
+    SELECT SUM(nascidos)::BIGINT AS soma_correta,
+           SUM(total_municipio_ano)::BIGINT AS soma_incorreta_do_total,
+           SUM(total_municipio_ano) / SUM(nascidos) AS fator_duplicacao
+    FROM exploratoria
+""").df())
+assert con.sql("SELECT SUM(total_municipio_ano) = 10 * SUM(nascidos) FROM exploratoria").fetchone()[0]
+```
+
+Esse é o mesmo problema conceitual do frete repetido em cada item na aula 8.
+Não basta a junção estar correta: as medidas precisam estar no grão declarado.
+
+```{python}
+# | label: diagnostico-percentuais
+display(con.sql("""
+    WITH municipal AS (
+        SELECT cod_municipio, ano,
+               SUM(nascidos) FILTER (WHERE faixa_idade_mae = 'Ignorada') AS ignorada,
+               SUM(nascidos) AS total
+        FROM exploratoria GROUP BY cod_municipio, ano
+    )
+    SELECT ROUND(AVG(100.0 * ignorada / NULLIF(total, 0)), 4) AS media_simples_pct,
+           ROUND(100.0 * SUM(ignorada) / NULLIF(SUM(total), 0), 4) AS razao_das_somas_pct
+    FROM municipal
+""").df())
+```
+
+A média simples dá o mesmo peso a cada município-ano; a razão das somas mede a
+participação dos registros. São estimandos diferentes: só a segunda responde
+“qual porcentagem dos registros tem idade ignorada?”. Percentuais não se somam.
+
+```{python}
+# | label: calendario-e-lacunas
+display(con.sql("""
+    WITH calendario AS (SELECT UNNEST(generate_series(2003, 2020)) AS ano),
+    municipios AS (SELECT DISTINCT cod_municipio FROM trusted),
+    presentes AS (SELECT DISTINCT cod_municipio, ano FROM exploratoria)
+    SELECT c.ano, COUNT(*) AS municipios_esperados,
+           COUNT(p.cod_municipio) AS municipios_presentes,
+           COUNT(*) - COUNT(p.cod_municipio) AS lacunas
+    FROM calendario c CROSS JOIN municipios m
+    LEFT JOIN presentes p USING (ano, cod_municipio)
+    GROUP BY c.ano ORDER BY c.ano
+""").df())
+con.close()
+```
+
+O calendário será **anual**, 2003–2024 inclusive, gerado independentemente da
+presença de fatos. Não se inventam dias e meses que a fonte não informou. Ao
+contrário do exemplo de dias sem vendas da aula, ausência aqui pode significar
+quarentena: o LEFT JOIN deixa `NULL`, não `COALESCE(..., 0)`.
+
+## 4. Dimensões propostas
+
+| Tabela | Chave substituta | Chave natural / atributos |
+|---|---|---|
+| `dim_municipio` | `municipio_sk` | código IBGE textual de 7 dígitos, nome, UF=MA, região=Nordeste; hierarquia achatada, sem joins em cadeia |
+| `dim_ano` | `ano_sk` | ano inteiro, 2003–2024 inclusive; sem falsa precisão diária |
+| `dim_faixa_idade` | `faixa_sk` | rótulo, ordem de exibição, idade conhecida; Ignorada explícita, última na ordem |
+| `dim_origem_valor` | `origem_sk` | `valor_era_traco` booleano e descrição (zero publicado como traço / valor numérico publicado) |
+
+As chaves serão numeradas deterministicamente por dimensão, em carga completa.
+Dimensões e fatos serão reconstruídas juntas; não reutilizar as chaves dessa
+estratégia em carga incremental. Uma faixa Ignorada é um membro conhecido do
+domínio, não uma FK nula. Chave natural sem correspondência deve interromper a
+carga, não desaparecer num INNER JOIN nem ganhar categoria inventada.
+
+## 5. Fatos e aditividade
+
+| Tabela | Grão | Colunas / medidas |
+|---|---|---|
+| `fato_registros` | município × ano × faixa | quatro FKs; `nascidos` inteiro não negativo |
+| `fato_registros_municipio_ano` | município × ano | FKs de município e ano; `registros` = soma das faixas, `registros_idade_ignorada` e `celulas_era_traco` derivadas da central |
+
+`nascidos` é aditiva entre municípios, faixas mutuamente exclusivas e anos de
+registro. Somar anos mede registros em todo o intervalo, não crianças nascidas
+nesse intervalo. A agregada responde à evolução municipal sem filtrar faixa ou
+origem do valor. Percentuais de idade ignorada e variações entre anos são
+calculados na consulta, com denominador explícito e proteção de divisão por zero.
+`celulas_era_traco` conta células da fonte, não nascimentos desconhecidos.
+
+```{mermaid}
+erDiagram
+    dim_municipio ||--o{ fato_registros : municipio_sk
+    dim_ano ||--o{ fato_registros : ano_sk
+    dim_faixa_idade ||--o{ fato_registros : faixa_sk
+    dim_origem_valor ||--o{ fato_registros : origem_sk
+    dim_municipio ||--o{ fato_registros_municipio_ano : municipio_sk
+    dim_ano ||--o{ fato_registros_municipio_ano : ano_sk
+```
+
+A agregada deriva da central; não deve ser juntada diretamente a ela para
+somar `registros`, pois isso recriaria o total repetido por faixa. Não é uma
+segunda fonte independente. Medidas compartilhadas são reconciliadas no mesmo
+grão. Não se cria uma fato adicional só para armazenar o Total redundante da
+trusted.
+
+Matriz de barramento: um processo, registro civil, usa município, ano e idade
+da mãe; origem do valor é contexto técnico de qualidade. Não se inventam outros
+processos para preencher o exercício.
+
+## 6. Contrato da construção futura (segunda metade)
+
+1. Validar trusted, dez faixas por par e código/nome sem conflito; construir as
+   quatro dimensões, incluindo os 22 anos e as dez faixas do domínio.
+2. Conferir unicidade das chaves naturais e substitutas e, antes das fatos,
+   contar órfãs com LEFT JOIN para cada chave; todas devem dar zero.
+3. Construir central com LEFT JOIN; conferir FKs não nulas e grão único.
+4. Conferir trusted × central: número de linhas, soma de `nascidos`, contagem
+   de traços; conferir também por município/ano/faixa para detectar trocas que
+   preservem o total global. Zero em uma medida não prova que as outras batem.
+5. Construir agregada a partir da central e reconciliar contagens de pares,
+   registros, idade ignorada e células publicadas como traço.
+6. Testar propositalmente a dimensão sem o último ano; exigir falha antes de
+   qualquer gravação. Desfazer a alteração. Não basta procurar FK nula depois
+   de INNER JOIN, porque ele teria apagado as linhas órfãs.
+7. Só após todas as conferências, gravar Parquets em `data/gold/`, reler,
+   conferir valores e tipos e testar reexecução determinística.
+
+**Ponto de parada:** o desenho está declarado e seus diagnósticos executados;
+o script de modelagem e a camada gold não fazem parte desta primeira metade.

@@ -1,7 +1,7 @@
 [project]
 name = "natalidade"
 version = "0.1.0"
-description = "Add your description here"
+description = "Preparação e análise dos registros de nascidos vivos no Maranhão (IBGE/SIDRA)"
 readme = "README.md"
 authors = [
     { name = "Felipe Moura", email = "olive.felipe2014@gmail.com" }
@@ -19,6 +19,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "jupyter>=1.1.1",
+    "matplotlib>=3.11.2",
     "missingno>=0.5.2",
     "quarto-cli>=1.10.18",
 ]
