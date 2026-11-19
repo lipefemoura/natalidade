@@ -1,0 +1,164 @@
+---
+title: "Quais registros diminuíram no Maranhão?"
+subtitle: "2003–2024 · análise descritiva, sem confirmação inferencial"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    include-in-header:
+      text: |
+        <style>
+        .cell-output-display img { max-width: 100%; height: auto; }
+        .cell-output-display { overflow-x: auto; }
+        .cell-output-display table { font-size: .88rem; }
+        .cell-output-display th, .cell-output-display td { white-space: normal; }
+        </style>
+execute:
+  echo: true
+  warning: false
+---
+
+## Pergunta e comparabilidade
+
+Esta etapa compara o número de **registros em cartório**, não a quantidade de
+nascimentos ocorridos. A mudança é calculada apenas para municípios que têm
+observação aprovada **nas duas pontas** e para as dez faixas de cada ponta.
+Uma linha ausente por quarentena não é zero. As somas não representam o total
+oficial do Maranhão: excluem municípios-ano em quarentena e registros sem
+município de residência.
+
+O recorte é descritivo e exploratório. O relatório da Etapa 1 e a análise
+exploratória já examinaram o dado; a quarentena foi definida olhando a série
+completa. Portanto, **2024 não é holdout independente**, e não se calculam aqui
+valor-p ou intervalo de confiança como se a hipótese tivesse sido definida antes
+de observar os resultados. A pandemia, o registro tardio, a idade ignorada e
+as mudanças de cobertura também impedem uma leitura causal.
+
+```{python}
+# | label: carregar-analise
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import display
+from src.analyze import executar
+
+plt.rcParams.update({"figure.figsize": (10, 4.5), "axes.spines.top": False,
+                     "axes.spines.right": False, "font.size": 10})
+saidas = executar(imprimir=False)
+faixas = saidas["resumo_mudancas_faixa"]
+ranking = saidas["maiores_quedas_municipio_faixa"]
+sensibilidade = saidas["sensibilidade_sem_sao_luis"]
+```
+
+## Cobertura pareada
+
+```{python}
+# | label: cobertura-pareada
+display(saidas["pareamento_pontas"].T.rename(columns={0: "Contagem"}))
+```
+
+Foram retidos **203 de 217 municípios**, ou **2.030 pares município-faixa**.
+São Luís participa das duas pontas, inclusive da combinação suspeita descrita
+no relatório anterior. Essa regra deixa fora 14 municípios sem uma das pontas
+aprovada; os totais abaixo são somente dos 203 pareados.
+
+## Mudança agregada por faixa
+
+A variação absoluta é a soma dos registros em 2024 menos a de 2003, no mesmo
+conjunto de municípios. Percentuais com base inicial zero ficam indefinidos;
+não se substituem por zero nem se ordena o ranking por taxas instáveis.
+
+```{python}
+# | label: resumo-faixa
+resumo_curto = faixas[["faixa_idade_mae", "registros_2003", "registros_2024",
+             "variacao_absoluta", "variacao_pct"]].rename(columns={
+  "faixa_idade_mae": "Faixa", "registros_2003": "2003", "registros_2024": "2024",
+  "variacao_absoluta": "Δ registros", "variacao_pct": "Δ %",
+})
+display(resumo_curto.round(2))
+fig, ax = plt.subplots()
+cores = ["#b23a48" if valor < 0 else "#087f8c" for valor in faixas.variacao_absoluta]
+ax.barh(faixas.faixa_idade_mae, faixas.variacao_absoluta, color=cores)
+ax.axvline(0, color="#333333", linewidth=0.8)
+ax.invert_yaxis()
+ax.set(xlabel="Variação de registros (2024 − 2003)",
+       title="Mudança agregada nas dez faixas — 203 municípios pareados")
+plt.tight_layout()
+plt.show()
+```
+
+Na amostra pareada, a maior redução agregada absoluta está em **25 a 29 anos**,
+com **38.662 registros a menos** (−63,85%). A faixa de 30 a 34 anos aumentou
+2.000 registros (+15,11%) e a de 35 a 39 aumentou 1.295 (+17,87%). Isso descreve
+registros; não mede risco por idade nem taxa de fecundidade.
+
+## Municípios e faixas com maiores reduções
+
+```{python}
+# | label: ranking
+top = ranking.head(10).copy()
+top["municipio_faixa"] = top.municipio + " · " + top.faixa_idade_mae
+display(top[["municipio_faixa", "registros_2003", "registros_2024",
+       "queda_absoluta", "variacao_pct"]].rename(columns={
+  "municipio_faixa": "Município · faixa", "registros_2003": "2003",
+  "registros_2024": "2024", "queda_absoluta": "Redução",
+  "variacao_pct": "Δ %",
+}).round(2))
+top = top.sort_values("queda_absoluta")
+fig, ax = plt.subplots(figsize=(10, 5.5))
+rotulos = top.municipio + " · " + top.faixa_idade_mae
+ax.barh(rotulos, top.queda_absoluta, color="#b23a48")
+ax.set(xlabel="Redução de registros (2003 − 2024)",
+       title="Dez maiores reduções absolutas no conjunto pareado")
+plt.tight_layout()
+plt.show()
+```
+
+**São Luís, 25 a 29 anos**, lidera a redução absoluta. O relatório da primeira
+etapa já havia marcado essa observação de 2003 como suspeita: 13.789 de 24.181
+registros do município, ou 57,02%, estavam nessa faixa. O ranking não deve ser
+interpretado sem avaliar a sensibilidade a esse ponto.
+
+## Sensibilidade: retirar a combinação suspeita
+
+A análise abaixo retira **todo São Luís**, e não apenas uma observação escolhida
+após ver o ranking. É um diagnóstico de influência, não uma correção nem uma
+estimativa alternativa oficial.
+
+```{python}
+# | label: sensibilidade
+comparacao = faixas[["faixa_idade_mae", "variacao_absoluta", "variacao_pct"]].merge(
+    sensibilidade[["faixa_idade_mae", "variacao_absoluta", "variacao_pct"]],
+    on="faixa_idade_mae", suffixes=("_com_sao_luis", "_sem_sao_luis"),
+    validate="one_to_one",
+)
+comparacao = comparacao.rename(columns={
+  "faixa_idade_mae": "Faixa", "variacao_absoluta_com_sao_luis": "Δ com São Luís",
+  "variacao_pct_com_sao_luis": "% com São Luís",
+  "variacao_absoluta_sem_sao_luis": "Δ sem São Luís",
+  "variacao_pct_sem_sao_luis": "% sem São Luís",
+})
+display(comparacao.round(2))
+```
+
+Sem São Luís, a faixa de **25 a 29 anos ainda apresenta a maior redução
+agregada**, agora de 27.978 registros (−59,84%), seguida por 20 a 24 anos
+(−23.299; −51,48%). A combinação suspeita amplia bastante a queda absoluta
+atribuída à primeira faixa, mas não muda a ordem agregada das duas principais.
+O resultado não prova que o restante do dado está livre de distorções.
+
+## O que falta para a inferência
+
+Não há um **mínimo de relevância prática** definido pela equipe/gestor, e a
+pergunta foi revisitada após olhar os resultados. Escolher agora um limiar e
+rodar bootstrap/permutação não produziria confirmação pré-especificada. Além
+disso, os municípios não são uma amostra aleatória da população de municípios,
+e a seleção de pares completos está ligada à quarentena.
+
+Para continuar a análise inferencial com honestidade, falta obter um recorte
+realmente novo ou formular uma hipótese prospectiva, acordar a menor diferença
+que mudaria uma decisão, documentar o plano antes de observar o próximo período
+e escolher uma unidade de reamostragem compatível com a dependência dos dados.
+Até lá, estas tabelas servem para priorizar investigação e completar o diagnóstico
+descritivo, não para declarar significância ou causa.

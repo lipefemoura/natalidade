@@ -72,23 +72,27 @@ src/transform.py   de data/raw/ para data/trusted/
 diagnostico.qmd    diagnóstico do dado bruto
 ```
 
-## Etapa 2 — primeira metade
+## Etapa 2 — andamento (aproximadamente 75%)
 
 Escopo adotado a partir dos desafios das aulas: **1. exploração; 2. Tidy Data e
-flat table; 3. desenho dimensional**. Os materiais locais contêm exercícios
-teóricos da Etapa 2, não um enunciado prático próprio. Ainda faltam **4. construir
-gold; 5. análise estatística; 6. síntese e relatório final**. Não há algoritmo
-treinado, confirmação de hipótese ou ranking final de quedas nesta entrega parcial.
+flat table; 3. desenho dimensional; 4. construção/reconciliação da gold; início
+da análise descritiva pareada**. Os materiais locais contêm exercícios teóricos
+da Etapa 2, não um enunciado prático próprio. Ainda faltam **inferência
+confirmatória e síntese/relatório final**. Não há algoritmo treinado nem
+confirmação de hipótese.
 
 Depois de executar a primeira etapa, na raiz do projeto:
 
 ```bash
 uv sync
 uv run python -m src.prepare
+uv run python -m src.model
+uv run python -m src.analyze
 uv run python -m unittest discover -s tests -v
 uv run quarto render exploracao.qmd
 uv run quarto render tidy.qmd
 uv run quarto render estrela.qmd
+uv run quarto render analise.qmd
 ```
 
 | Artefato | Finalidade |
@@ -96,19 +100,43 @@ uv run quarto render estrela.qmd
 | `src/prepare.py` | Validação do grão, exploração 2003–2020, coorte constante, pivot/melt reversível e flat table temporal |
 | `exploracao.qmd` | Cobertura, evolução, distribuições, massa no zero, idade ignorada e suspeita de São Luís em 2003 |
 | `tidy.qmd` | Justificativa do formato, demonstração de melt e definição de X/y |
-| `estrela.qmd` | Processo, granularidade, dimensões, medidas, agregada proposta e verificações para a futura carga |
-| `tests/test_prepare.py` | Testes sem rede de cobertura, contagens, round-trip e seleção temporal dos atributos |
+| `estrela.qmd` | Processo, granularidade, dimensões, medidas e verificações da carga |
+| `src/model.py` | Dimensões, fato por município-ano-faixa e agregada por município-ano; valida chaves e reconcilia antes da gravação |
+| `src/analyze.py` | Variações pareadas 2003–2024, rankings absolutos e sensibilidade a São Luís |
+| `analise.qmd` | Avaliação descritiva dos resultados; explicita por que não há inferência confirmatória |
+| `tests/` | Testes sem rede de preparação, carga dimensional, fail-stop e análise pareada |
 
 O comando de preparação grava nove Parquets em `data/analysis/` (fora do Git):
 série anual, perfil de faixas, idade ignorada, totais exploratórios, tabela larga,
 tabela longa, flat table, `X` e `y`. Todos são recalculáveis, e os arquivos são
-relidos e comparados depois da gravação. Esta pasta **não é a camada gold**.
+relidos e comparados depois da gravação.
+
+A camada gold guarda seis Parquets (quatro dimensões e duas fatos), também fora
+do Git. As chaves substitutas são reproduzíveis na reconstrução integral. A
+fato detalhada soma 47.110 linhas e a agregada, 4.711 pares município-ano. O
+modelo compara cada combinação município-ano-faixa com a trusted, além de
+reconciliar linhas, registros, idade ignorada e células originalmente escritas
+com traço. A dimensão anual cobre 2003–2024, mesmo quando não há fato para certo
+ano ou município.
 
 Na flat table, cada linha é um município completo em 2018–2021. `X` tem cinco
 atributos calculados somente em 2018–2020; `y` indica se os registros de 2021
 ficaram abaixo da média anual desse período. Nome, código e contagem futura
 ficam fora de `X`. A ordem das linhas é compartilhada; a flat table preserva
 identificação e contagem do alvo para auditoria. Não há treinamento.
+
+`src/analyze.py` compara os registros de 2003 e 2024 somente para os 203
+municípios com ambas as pontas aprovadas. A saída é pareada por município e
+faixa; não representa o total oficial estadual. A maior redução agregada ocorre
+em 25–29 anos, mas a sensibilidade retira São Luís, cuja distribuição em 2003
+foi sinalizada no relatório da primeira fase. A ordem das faixas não muda, mas
+o tamanho do recuo se reduz.
+
+Essa comparação é **descritiva, não confirmatória**: os dados já haviam sido
+examinados, a quarentena usa a série inteira, não há mínimo de relevância
+prática definido com o gestor e não existe holdout independente. Não são
+calculados valor-p ou intervalos como se fossem confirmação nova. A próxima
+etapa depende de hipótese prospectiva, dados novos e limiar de decisão acordado.
 
 ### Cuidados de interpretação
 

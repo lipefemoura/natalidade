@@ -1,6 +1,6 @@
 ---
-title: "Desenho dimensional dos registros de nascidos vivos"
-subtitle: "Etapa 2 — terceiro marco; modelo especificado, ainda não construído"
+title: "Desenho e construção dimensional dos registros de nascidos vivos"
+subtitle: "Etapa 2 — modelo gold construído e reconciliado"
 lang: pt-BR
 format:
   html:
@@ -145,7 +145,7 @@ Matriz de barramento: um processo, registro civil, usa município, ano e idade
 da mãe; origem do valor é contexto técnico de qualidade. Não se inventam outros
 processos para preencher o exercício.
 
-## 6. Contrato da construção futura (segunda metade)
+## 6. Construção executada e evidência
 
 1. Validar trusted, dez faixas por par e código/nome sem conflito; construir as
    quatro dimensões, incluindo os 22 anos e as dez faixas do domínio.
@@ -163,5 +163,25 @@ processos para preencher o exercício.
 7. Só após todas as conferências, gravar Parquets em `data/gold/`, reler,
    conferir valores e tipos e testar reexecução determinística.
 
-**Ponto de parada:** o desenho está declarado e seus diagnósticos executados;
-o script de modelagem e a camada gold não fazem parte desta primeira metade.
+```{python}
+# | label: gold-construida
+from pathlib import Path
+from src.model import DIR_GOLD, TABELAS
+
+gold = {nome: pd.read_parquet(DIR_GOLD / f"{nome}.parquet") for nome in TABELAS}
+contagens = pd.DataFrame([{"tabela": nome, "linhas": len(tabela),
+                           "colunas": len(tabela.columns)}
+                          for nome, tabela in gold.items()])
+display(contagens)
+trusted_linhas = len(base)
+assert len(gold["fato_registros"]) == trusted_linhas
+assert gold["fato_registros"].nascidos.sum() == base.nascidos.sum()
+assert len(gold["fato_registros_municipio_ano"]) == base[["cod_municipio", "ano"]].drop_duplicates().shape[0]
+assert gold["fato_registros_municipio_ano"].registros.sum() == base.nascidos.sum()
+```
+
+**Avaliação:** as seis tabelas foram construídas e conferidas com a trusted,
+inclusive por município-ano-faixa e por município-ano. O código de produção é
+`src/model.py`; as linhas ausentes por quarentena continuam ausentes na fato,
+sem serem preenchidas por zero. O marco seguinte é a síntese descritiva e,
+quando houver hipótese prévia, a análise confirmatória.
