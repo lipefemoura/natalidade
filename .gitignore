@@ -2,7 +2,8 @@
 .env
 
 # Material de referência e planejamento local
-/docs/
+/docs/*
+!/docs/populacao.md
 /roteiro-atividade-2.md
 
 # Ambiente virtual
@@ -29,6 +30,10 @@ diagnostico_files/
 /estrela_files/
 /analise.html
 /analise_files/
+/diagnostico-populacao.html
+/diagnostico-populacao_files/
+/hipotese-populacao.html
+/hipotese-populacao_files/
 /data/analysis/
 /data/gold/
 

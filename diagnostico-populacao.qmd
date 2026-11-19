@@ -1,0 +1,104 @@
+---
+title: "População municipal do Maranhão — diagnóstico e contrato"
+subtitle: "Etapa 1 · IBGE Agregados 6579 / 9324"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+execute:
+  warning: false
+---
+
+## Fonte e proveniência
+
+[API oficial](https://servicodados.ibge.gov.br/api/docs/agregados?versao=3),
+agregado **6579**, variável **9324**, unidade **Pessoas**, nível **N6**, UF **21**.
+Sem autenticação. Coleta em uma consulta abaixo do limite de 100 mil valores,
+com timeout, retry/backoff para rede/429/5xx e interrupção em erros permanentes.
+Os JSON originais, metadados, períodos, URL e horário UTC ficam na raw por data;
+a repetição no mesmo dia usa cache sem sobrescrever o dado bruto.
+
+```{python}
+import json
+import pandas as pd
+from IPython.display import display
+from src.population import RAIZ, ANOS
+
+base = pd.read_parquet(RAIZ / "data/trusted/populacao.parquet")
+rejeitada = pd.read_parquet(RAIZ / "data/quarentena/populacao.parquet")
+perfil = pd.read_parquet(RAIZ / "data/analysis/perfil_populacao.parquet")
+resumo = json.loads((RAIZ / "data/analysis/diagnostico_populacao.json").read_text())
+display(pd.Series(resumo, name="Diagnóstico").to_frame())
+```
+
+## Perfil, ausências e duplicatas
+
+Grão: **município × ano**. A janela pretendida é 2003–2024; a fonte não publica
+**2007, 2010, 2022 e 2023**. Isso é ausência estrutural, não população zero.
+Não se interpolam lacunas nem se acrescentam censos de outra referência temporal.
+Não se somam populações de anos diferentes como se fossem pessoas distintas.
+
+```{python}
+display(pd.DataFrame({"tipo": base.dtypes.astype(str),
+                      "ausentes_pct": base.isna().mean() * 100}))
+display(base.groupby("ano").agg(municipios=("cod_municipio", "nunique"),
+                                populacao=("populacao", "sum")))
+display(base.populacao.describe().to_frame())
+print("Duplicatas na chave trusted:", base.duplicated(["cod_municipio", "ano"]).sum())
+display(rejeitada)
+```
+
+## Tabela de decisões
+
+| Situação | Tratamento e justificativa |
+|---|---|
+| Código IBGE | Texto de sete dígitos, prefixo 21; junções por código, nunca por nome |
+| Nome | Retirar somente sufixo ` - MA` e espaços externos; preservar acentos |
+| População positiva | Inteiro, sem arredondar ou winsorizar |
+| `-` e `0` | Zero publicado, impróprio como denominador: quarentena |
+| `..`, `...`, `X` | Não aplicável, indisponível e suprimido: quarentena com valor original |
+| Símbolo desconhecido | Interrupção, sem publicar trusted nova |
+| Duplicata idêntica | Remover e contabilizar; valores conflitantes interrompem |
+| Ano não publicado | Ausência estrutural; sem imputação |
+| Extremo de tamanho | Manter: municípios grandes não são erro |
+| Mudança anualizada absoluta >10% | Sinalizar para revisão, sem excluir automaticamente |
+
+Não há evidência para aplicar uma regra de nulos MCAR/MAR ou imputar população.
+A sinalização temporal é apenas uma triagem operacional, não uma regra inferida
+para excluir municípios. Revisões intercensitárias e mudanças territoriais podem
+gerar saltos legítimos; crescimentos entre anos não consecutivos são anualizados.
+
+```{python}
+display(perfil.loc[perfil.revisar_variacao,
+    ["cod_municipio", "municipio", "ano", "populacao", "intervalo_anos",
+     "variacao_anualizada_pct"]].round(2))
+```
+
+## Contrato e reconciliação
+
+Pandera verifica colunas estritas, tipos, domínio anual, código municipal,
+população positiva, tabela/variável e chave única. Antes disso, a fronteira
+verifica unidade, nível, classificação, 217 municípios e todos os períodos
+esperados. Falha estrutural interrompe; símbolos documentados/zero geram
+quarentena com motivo e horário UTC. Reconciliação:
+**raw = duplicatas idênticas + trusted + quarentena**. Cada Parquet é relido
+e comparado antes da substituição. Nada é corrigido por regra ad hoc.
+
+```{python}
+assert resumo["linhas_raw"] == (resumo["duplicatas_identicas"] + len(base) + len(rejeitada))
+assert base.ano.nunique() == len(ANOS)
+print("Reconciliação aprovada; imputações e winsorizações:",
+      resumo["imputacoes"], resumo["winsorizacoes"])
+```
+
+## Limite da hipótese
+
+População residente mede crescimento demográfico municipal, não expansão urbana,
+PIB ou urbanização. A tabela 2609 existente mede **registros**, inclusive tardios;
+dividi-los pela população produz **registros por mil habitantes**, não a taxa
+bruta de natalidade por ano de ocorrência. Confirmar a hipótese literal requer
+uma fonte de nascimentos ocorridos por residência materna e período compatível.
+Correlação também não estabelece causalidade; população no denominador pode
+induzir associação mecânica negativa com o próprio crescimento populacional.

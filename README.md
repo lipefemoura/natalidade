@@ -74,6 +74,29 @@ diagnostico.qmd    diagnóstico do dado bruto
 
 ## Etapa 2 — andamento (aproximadamente 75%)
 
+### Nova hipótese e fonte populacional
+
+**Hipótese:** “Há correlação entre o crescimento da cidade e a queda da taxa de
+natalidade”. A população residente estimada (IBGE Agregados v3, tabela 6579,
+variável 9324) foi adicionada como fonte municipal independente. A documentação
+completa, contrato, limitações e decisões estão em [docs/populacao.md](docs/populacao.md)
+e o diagnóstico reproduzível em [diagnostico-populacao.qmd](diagnostico-populacao.qmd).
+
+```bash
+uv run python -m src.population
+uv run quarto render diagnostico-populacao.qmd
+# Para reprocessar sem rede:
+uv run python -m src.population --offline
+```
+
+A fonte publica 18 dos 22 anos de 2003–2024; 2007, 2010, 2022 e 2023 ficam
+ausentes, **sem interpolação ou substituição por censos**. A população tem grão
+município-ano e nunca deve ser somada sobre as faixas etárias dos registros.
+O numerador existente mede registros (inclusive tardios), não nascimentos por
+ocorrência: registros por mil habitantes **não são taxa bruta de natalidade**.
+A hipótese literal depende de fonte compatível de nascimentos; uma análise do
+indicador substituto deve ser explicitamente exploratória e não causal.
+
 Escopo adotado a partir dos desafios das aulas: **1. exploração; 2. Tidy Data e
 flat table; 3. desenho dimensional; 4. construção/reconciliação da gold; início
 da análise descritiva pareada**. Os materiais locais contêm exercícios teóricos
