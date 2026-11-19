@@ -10,6 +10,14 @@ execute:
   echo: true
 ---
 
+## Extensão para população residente
+
+A nova fonte é modelada em `fato_populacao`, no grão município-ano, compartilhando
+`dim_municipio` e `dim_ano`. População não é repetida por faixa etária e não se
+soma entre anos. A carga opcional é reconciliada célula a célula com a trusted;
+as fatos anteriores são preservadas. A aplicação à nova hipótese e a auditoria
+de cobertura estão em [hipotese-populacao.qmd](hipotese-populacao.qmd).
+
 ## 1. Processo
 
 O processo observado é **registrar nascidos vivos em cartório**, conforme as

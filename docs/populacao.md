@@ -107,3 +107,41 @@ chave conflitante interrompe a execução com mensagem. Os quatro anos ausentes
 estão documentados e não impedem análises de pares disponíveis. A hipótese
 literal permanece pendente de numerador compatível: o indicador de registros
 é apresentado separadamente, nunca como natalidade medida ou confirmação.
+
+## Etapa 2 — integração e resultados exploratórios
+
+Executar `uv run python -m src.population_analysis` e
+`uv run quarto render hipotese-populacao.qmd`. O primeiro comando reconstrói
+a gold e grava o painel e análises em `data/analysis/hipotese_populacao/`.
+O relatório reproduzível `hipotese-populacao.qmd` documenta Tidy/flat, dimensões,
+fatos, junções, definições e limitações. O grão populacional permanece em fato
+própria, com dimensões conformadas; nunca há população por faixa artificial.
+
+Auditoria real: 3.850 pares município-ano com ambas as fontes; 56 populações
+sem registros aprovados; 861 registros agregados sem população (anos não
+publicados). Nenhum caso é substituído por zero. Há 203 municípios nas pontas
+2003/2024. Queda positiva = indicador inicial menos final.
+
+| Cenário | n | Pearson crescimento × queda do indicador | Spearman |
+|---|---:|---:|---:|
+| 2003–2024, todos pareados | 203 | 0,2886 | 0,1678 |
+| 2003–2024, sem São Luís | 202 | 0,2887 | 0,1694 |
+| 2003–2024, sem saltos populacionais sinalizados | 153 | 0,2059 | 0,1398 |
+| 2011–2021, pareados | 212 | 0,0129 | −0,0741 |
+
+O sinal/tamanho depende da janela. Ademais, mantendo os registros iniciais
+constantes e variando somente o denominador, Pearson é **0,8436** nas pontas:
+isso ilustra forte associação matemática mesmo sem queda do numerador.
+No contraste com queda percentual dos próprios registros (sem população no
+desfecho), Pearson é **−0,3009**, e Spearman **−0,2989** em 2003–2024.
+Não atribuir a associação observada a comportamento reprodutivo ou urbanização.
+
+A flat temporal usa atributos de 2018–2020 e alvo de queda do indicador em
+2021, mantendo identificação e valor futuro fora de X. Não há treinamento,
+inferência confirmatória nem teste de significância. Correlações anuais usam
+apenas pares consecutivos publicados, separadamente por intervalo.
+
+**Conclusão:** a fonte populacional foi integrada com sucesso; a hipótese
+literal de natalidade não foi confirmada nem refutada e continua dependendo
+de um numerador de nascimentos ocorridos por residência materna. Não foi
+introduzida outra fonte sem revisão da equipe.

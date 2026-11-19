@@ -219,6 +219,40 @@ def _conferir_dominios(dims: dict[str, pd.DataFrame], anos: tuple[int, ...]) -> 
         raise ModeloInvalido("Dimensão de origem deve cobrir traço e valor numérico.")
 
 
+def fato_populacao(base: pd.DataFrame, dims: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """População fica em fato própria, nunca repetida por faixa etária.
+
+    As dimensões município e ano são conformadas às dos registros. A origem
+    da medida é preservada como atributos degenerados tabela/variável.
+    """
+    from src.population import CONTRATO
+
+    base = CONTRATO.validate(base, lazy=True)
+    fato = base.copy()
+    for tabela, natural, surrogate in (
+        ("dim_municipio", "cod_municipio", "municipio_sk"),
+        ("dim_ano", "ano", "ano_sk"),
+    ):
+        dim = dims[tabela]
+        _conferir_dimensao(fato, dim, natural, surrogate)
+        fato = fato.merge(dim[[natural, surrogate]], on=natural, how="left", validate="many_to_one")
+    chaves = ["municipio_sk", "ano_sk"]
+    if fato[chaves].isna().any().any() or fato.duplicated(chaves).any():
+        raise ModeloInvalido("Chave populacional órfã ou duplicada.")
+    saida = fato[chaves + ["populacao", "tabela", "variavel"]].sort_values(chaves).reset_index(drop=True)
+    reconstruida = (
+        saida.merge(dims["dim_municipio"][["municipio_sk", "cod_municipio"]],
+                    on="municipio_sk", validate="many_to_one")
+        .merge(dims["dim_ano"][["ano_sk", "ano"]], on="ano_sk", validate="many_to_one")
+    )
+    colunas = ["cod_municipio", "ano", "populacao", "tabela", "variavel"]
+    pd.testing.assert_frame_equal(
+        base[colunas].sort_values(colunas[:2]).reset_index(drop=True),
+        reconstruida[colunas].sort_values(colunas[:2]).reset_index(drop=True),
+    )
+    return saida
+
+
 def _publicar(
     tabelas: dict[str, pd.DataFrame],
     destino: Path,
@@ -254,6 +288,7 @@ def construir(
     origem: Path = TRUSTED,
     destino: Path = DIR_GOLD,
     anos: tuple[int, ...] = ANOS,
+    origem_populacao: Path | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Executar fail-stop em memória; nenhuma tabela é publicada antes de reconciliar."""
     if not origem.exists():
@@ -267,6 +302,9 @@ def construir(
     reconciliacao = reconciliar(base, dims, central, agregada)
     tabelas = {**dims, "fato_registros": central,
                "fato_registros_municipio_ano": agregada}
+    if origem_populacao is not None:
+        populacao = pd.read_parquet(origem_populacao)
+        tabelas["fato_populacao"] = fato_populacao(populacao, dims)
     _publicar(tabelas, destino)
     for nome, tabela in tabelas.items():
         print(f"{nome:34} {len(tabela):6} linhas -> {destino / (nome + '.parquet')}")
@@ -276,4 +314,5 @@ def construir(
 
 
 if __name__ == "__main__":
-    construir()
+    populacao = RAIZ / "data/trusted/populacao.parquet"
+    construir(origem_populacao=populacao if populacao.exists() else None)

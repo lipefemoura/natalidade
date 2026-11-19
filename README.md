@@ -97,6 +97,32 @@ ocorrência: registros por mil habitantes **não são taxa bruta de natalidade**
 A hipótese literal depende de fonte compatível de nascimentos; uma análise do
 indicador substituto deve ser explicitamente exploratória e não causal.
 
+### Segunda etapa com as duas fontes
+
+```bash
+uv run python -m src.population_analysis
+uv run quarto render hipotese-populacao.qmd
+uv run python -m unittest discover -s tests -v
+```
+
+[src/population_analysis.py](src/population_analysis.py) reconstrói a gold com
+`fato_populacao` separada (dimensões município/ano conformadas), valida/reconcilia
+as medidas e publica oito Parquets em `data/analysis/hipotese_populacao/`:
+painel, cobertura OUTER JOIN, pontas pareadas, correlações, correlações anuais,
+flat temporal, X e y. Os Parquets são relidos antes da publicação. O relatório
+[hipotese-populacao.qmd](hipotese-populacao.qmd) apresenta exploração, Tidy/flat,
+modelo dimensional, Pearson/Spearman descritivos e sensibilidades. Queda positiva
+é indicador inicial menos final. Um controle aritmético explicita a associação
+mecânica causada pela população no denominador. **Não há teste confirmatório.**
+
+Na amostra de 203 municípios pareados em 2003/2024, crescimento × queda do
+indicador apresenta Pearson **0,2886** e Spearman **0,1678**. Na janela 2011–2021,
+os valores são **0,0129** e **−0,0741**. A dependência da janela e o acoplamento
+matemático do denominador impedem interpretar isso como confirmação da hipótese.
+
+O comando `src.model` também inclui a fato populacional quando sua trusted
+existe; a API `construir` preserva o modo anterior sem população por padrão.
+
 Escopo adotado a partir dos desafios das aulas: **1. exploração; 2. Tidy Data e
 flat table; 3. desenho dimensional; 4. construção/reconciliação da gold; início
 da análise descritiva pareada**. Os materiais locais contêm exercícios teóricos
@@ -177,7 +203,8 @@ etapa depende de hipótese prospectiva, dados novos e limiar de decisão acordad
 	permanecem limitações; nenhuma variação é interpretada como efeito causal.
 
 Os materiais de aula em `/docs/`, o roteiro privado e os HTML renderizados
-ficam fora do versionamento. Os QMD, código e testes são os artefatos públicos
+ficam fora do versionamento; a documentação autoral `docs/populacao.md` é a
+exceção pública. Os QMD, código e testes são os artefatos públicos
 reproduzíveis. Esta etapa foi preparada com auxílio do GitHub Copilot para
 leitura dos materiais, implementação e validação; decisões analíticas ainda
 dependem de revisão da equipe.

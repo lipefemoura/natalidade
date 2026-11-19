@@ -4,7 +4,7 @@ import copy
 import unittest
 from unittest.mock import patch
 
-from src.population import ANOS, coletar, normalizar, perfil_temporal, validar_metadados
+from src.population import ANOS, coletar, normalizar, perfil_temporal, transformar, validar_metadados
 
 
 def resposta(valores=("100", "120")):
@@ -108,6 +108,29 @@ class PopulacaoTest(unittest.TestCase):
                 self.assertEqual(coletar(Path(pasta)), coleta)
                 get.assert_not_called()
             self.assertEqual(arquivos, {p.name: p.read_bytes() for p in coleta.iterdir()})
+
+    def test_falha_estrutural_preserva_trusted_anterior(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        meta = {"id": 6579, "variaveis": [{"id": 9324, "unidade": "Pessoas"}],
+                "nivelTerritorial": {"Administrativo": ["N6"]}, "classificacoes": []}
+        with tempfile.TemporaryDirectory() as pasta:
+            raiz = Path(pasta)
+            coleta = raiz / "raw"
+            coleta.mkdir()
+            for nome, dado in {"metadados": meta,
+                               "periodos": [{"id": str(ano)} for ano in ANOS],
+                               "populacao": resposta(("?", "120"))}.items():
+                (coleta / f"{nome}.json").write_text(json.dumps({"dado": dado}))
+            trusted = raiz / "data/trusted/populacao.parquet"
+            trusted.parent.mkdir(parents=True)
+            trusted.write_bytes(b"trusted-anterior-intacta")
+            with self.assertRaises(ValueError):
+                transformar(coleta, raiz)
+            self.assertEqual(trusted.read_bytes(), b"trusted-anterior-intacta")
+            self.assertFalse((raiz / "data/quarentena/populacao.parquet").exists())
 
 
 if __name__ == "__main__":

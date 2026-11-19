@@ -1,0 +1,192 @@
+---
+title: "Crescimento populacional e queda dos registros por habitante"
+subtitle: "Etapa 2 · associação exploratória municipal no Maranhão"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+execute:
+  warning: false
+  fig-width: 10
+  fig-height: 5
+  out-width: "100%"
+---
+
+## Hipótese e o que realmente pode ser medido
+
+**Hipótese proposta:** “Há correlação entre o crescimento da cidade e a queda da
+taxa de natalidade”. Crescimento é aqui **populacional municipal**, não expansão
+urbana. O numerador existente conta registros civis, inclusive tardios: portanto
+**não é possível testar literalmente a taxa de natalidade com estas duas fontes**.
+O exercício abaixo avalia separadamente um indicador substituto, **registros por
+mil habitantes**, sem confirmação inferencial ou interpretação causal.
+
+Os dados e a quarentena de registros já haviam sido examinados. A nova hipótese
+não transforma 2024 em holdout independente. Não há valor-p, decisão de rejeitar
+hipótese nula, limiar de relevância prática acordado nem algoritmo treinado.
+
+```{python}
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import display
+from src.population import RAIZ
+from src.population_analysis import X_COLUNAS
+
+pasta = RAIZ / "data/analysis/hipotese_populacao"
+saidas = {nome: pd.read_parquet(pasta / f"{nome}.parquet") for nome in
+          ("painel", "cobertura", "pontas", "correlacoes", "correlacoes_anuais", "flat", "X", "y")}
+pares = saidas["pontas"]
+plt.rcParams.update({"axes.spines.top": False, "axes.spines.right": False,
+                     "font.size": 10})
+```
+
+## Integração e cobertura
+
+As dez faixas de registros são **somadas antes** de juntar a população.
+O painel fica no grão município-ano; LEFT JOIN 1:1 preserva registros sem
+denominador como ausentes. Auditoria OUTER JOIN conta também população sem
+registros aprovados. Chave é o código IBGE, nunca o nome. Nenhum faltante vira
+zero e nenhum denominador é multiplicado pelas faixas.
+
+```{python}
+display(saidas["cobertura"].pivot_table(index="ano", columns="situacao", values="pares", fill_value=0))
+display(saidas["cobertura"].groupby("situacao")[["pares", "nomes_divergentes"]].sum())
+print("Municípios pareados 2003/2024:", len(pares))
+print("Municípios completos na flat temporal:", len(saidas["flat"]))
+```
+
+As estimativas 6579 não publicam 2007, 2010, 2022 ou 2023. Não se interpolam
+esses anos. Os registros excluídos pela quarentena permanecem ausentes e as
+somas da amostra não são totais oficiais do estado. Nomes divergentes são
+auditados, mas não descartam um código IBGE válido.
+
+## Tidy, flat table e separação temporal
+
+O painel já é tidy: uma linha por município-ano, uma variável por coluna. Não
+é necessário aplicar `melt` artificialmente. A tabela de pontas é uma flat
+descritiva por município. Outra flat permite exercício supervisionado:
+**X usa somente 2018–2020; y é a queda do indicador em 2021 em relação à média
+dos três anos anteriores**. Exige todas as observações; sem imputar lacunas.
+
+```{python}
+display(saidas["flat"].head())
+display(pd.DataFrame({"atributos_X": X_COLUNAS}))
+print("Dimensões X/y:", saidas["X"].shape, saidas["y"].shape)
+```
+
+Código, nome e indicador futuro ficam fora de X. Essa separação local de
+atributos/alvo **não desfaz a seleção global pela quarentena** e não constitui
+validação externa. Não se treina modelo nem se apresenta desempenho preditivo.
+
+## Modelo dimensional e reconciliação
+
+`fato_populacao` compartilha `dim_municipio` e `dim_ano` com as fatos existentes;
+grão município-ano, medida população e proveniência tabela/variável.
+Não existe dimensão de faixa etária de população: a fonte fornece apenas total.
+A fato de registros continua no grão município-ano-faixa e sua agregada no grão
+município-ano. A nova fato é reconciliada célula a célula com a trusted antes
+da publicação conjunta em gold. Chaves órfãs ou duplicadas interrompem a carga.
+
+```{python}
+gold = pd.read_parquet(RAIZ / "data/gold/fato_populacao.parquet")
+display(gold.head())
+display(gold.groupby("ano_sk").agg(celulas=("populacao", "size"),
+                                  soma_no_ano=("populacao", "sum")))
+```
+
+População pode ser somada entre municípios do mesmo ano, **não entre anos**.
+O indicador agregado é razão das somas no mesmo conjunto de municípios,
+nunca soma ou média simples de taxas municipais.
+
+## Medidas e correlações de pontas
+
+Para cada município com ambas as pontas válidas:
+
+$$I_t = 1000\,R_t/P_t,\quad G = 100(P_{2024}/P_{2003}-1),\quad
+Q = I_{2003}-I_{2024}.$$
+
+Queda $Q$ é positiva quando o indicador diminui. Assim, **correlação positiva
+entre G e Q**, e não negativa, descreve crescimento acompanhado de maior queda.
+Pearson resume associação linear e Spearman usa os ranks médios (robustez de
+ordenação). O tamanho da amostra é informado para cada medida; associação
+com dados constantes ou menos de três pares é indefinida, nunca zero.
+
+```{python}
+display(saidas["correlacoes"].round(4))
+fig, ax = plt.subplots()
+ax.scatter(pares.crescimento_pop_pct.astype(float),
+           pares.queda_indicador_por_mil.astype(float),
+           s=28, alpha=.65, color="#087f8c", edgecolors="none")
+ax.axhline(0, color="#555", linewidth=.8)
+ax.axvline(0, color="#555", linewidth=.8)
+ax.set(xlabel="Crescimento populacional 2003–2024 (%)",
+       ylabel="Queda de registros por mil habitantes (pontos)",
+       title=f"Associação descritiva — {len(pares)} municípios pareados")
+plt.tight_layout()
+plt.show()
+```
+
+## Sensibilidade e associação mecânica
+
+Os cenários são: todas as pontas válidas; sem São Luís (distribuição de registros
+suspeita em 2003); sem qualquer salto populacional anualizado >10% sinalizado
+(triagem arbitrária, pode remover mudanças legítimas); 2011–2021 (outra janela,
+sem o intervalo censitário final). Não se escolhe o cenário de maior correlação.
+
+Como $P_t$ aparece no crescimento **e no denominador do indicador**, há
+acoplamento matemático: o indicador pode cair mesmo com registros constantes.
+O controle `queda_denominador_constante_numerador` mantém $R_{2003}$ fixo e
+calcula $I_{2003}-1000R_{2003}/P_{2024}$. É contrafactual aritmético,
+**não estimativa causal**. A correlação de crescimento com queda percentual dos
+registros (sem usar população no desfecho) também é mostrada como contraste.
+
+```{python}
+colunas = ["municipio", "crescimento_pop_pct", "queda_indicador_por_mil",
+           "queda_registros_pct", "queda_denominador_constante_numerador"]
+display(pares[colunas].head(10).round(2))
+```
+
+## Robustez temporal: apenas anos consecutivos publicados
+
+Cada coeficiente anual compara **municípios diferentes no mesmo par de anos**.
+Não se empilham repetições município-ano como observações independentes.
+Intervalos como 2021–2024 não são chamados anuais; anos não publicados são pulados.
+As coortes anuais podem variar: não comparar coeficientes como se fossem sempre
+os mesmos municípios nem interpretar mudanças como testes independentes.
+
+```{python}
+anual = saidas["correlacoes_anuais"]
+display(anual.loc[anual.desfecho.eq("queda_indicador_por_mil")].round(4))
+```
+
+## Síntese e limite de decisão
+
+```{python}
+principal = saidas["correlacoes"].query(
+    "cenario == '2003_2024_todos_pareados' and desfecho == 'queda_indicador_por_mil'"
+).iloc[0]
+print(f"Indicador substituto, n={principal['n']}: "
+      f"Pearson={principal.pearson:.3f}; Spearman={principal.spearman:.3f}.")
+```
+
+Esses coeficientes descrevem a amostra observada; **não confirmam nem refutam a
+hipótese literal de natalidade**. Registros tardios, pandemia, seleção pela
+quarentena, migração, estrutura etária e revisões intercensitárias permanecem
+explicações alternativas. Há ainda risco de falácia ecológica.
+
+Nas pontas 2003/2024, a associação com queda do indicador é positiva, mas
+modesta (Pearson 0,2886; Spearman 0,1678). Em 2011–2021 ela fica próxima de zero
+e muda de sinal no critério de ranks (0,0129; −0,0741). Retirar São Luís quase
+não altera o coeficiente; retirar saltos populacionais o reduz. O controle
+com numerador fixo tem Pearson 0,8436: **parte da associação é matematicamente
+esperada pelo denominador**. Com a queda percentual dos registros, sem usar
+população no desfecho, a associação é negativa (Pearson −0,3009). Não há base
+para dizer que cidades que crescem demonstraram queda da natalidade.
+
+Para a próxima decisão, obter nascimentos **ocorridos no ano e por residência
+materna**, definir crescimento (população total versus urbanização), escolher
+janela territorialmente comparável e acordar relevância prática. Uma análise
+confirmatória exigirá planejamento independente e tratamento da dependência
+temporal/espacial; adicionar denominador não resolve essas limitações.
