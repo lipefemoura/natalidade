@@ -109,11 +109,12 @@ quarentena: o LEFT JOIN deixa `NULL`, não `COALESCE(..., 0)`.
 | Tabela | Chave substituta | Chave natural / atributos |
 |---|---|---|
 | `dim_municipio` | `municipio_sk` | código IBGE textual de 7 dígitos, nome, UF=MA, região=Nordeste; hierarquia achatada, sem joins em cadeia |
-| `dim_ano` | `ano_sk` | ano inteiro, 2003–2024 inclusive; sem falsa precisão diária |
+| `dim_ano` | `ano_sk = ano` (natural) | ano e década, 2003–2024 inclusive; sem falsa precisão diária |
 | `dim_faixa_idade` | `faixa_sk` | rótulo, ordem de exibição, idade conhecida; Ignorada explícita, última na ordem |
 | `dim_origem_valor` | `origem_sk` | `valor_era_traco` booleano e descrição (zero publicado como traço / valor numérico publicado) |
 
-As chaves serão numeradas deterministicamente por dimensão, em carga completa.
+As chaves são numeradas deterministicamente por dimensão, em carga completa,
+exceto o calendário anual, que usa o próprio ano, como a dimensão data da aula.
 Dimensões e fatos serão reconstruídas juntas; não reutilizar as chaves dessa
 estratégia em carga incremental. Uma faixa Ignorada é um membro conhecido do
 domínio, não uma FK nula. Chave natural sem correspondência deve interromper a
@@ -149,9 +150,11 @@ segunda fonte independente. Medidas compartilhadas são reconciliadas no mesmo
 grão. Não se cria uma fato adicional só para armazenar o Total redundante da
 trusted.
 
-Matriz de barramento: um processo, registro civil, usa município, ano e idade
-da mãe; origem do valor é contexto técnico de qualidade. Não se inventam outros
-processos para preencher o exercício.
+Matriz de barramento do núcleo: registrar nascidos vivos usa município, ano e
+idade da mãe; origem do valor é contexto técnico de qualidade. A extensão
+opcional observa a população residente estimada por município-ano: usa somente
+município e ano, com população aditiva entre municípios do mesmo ano e não no
+tempo. Tabela e variável são identificadores de proveniência, não medidas.
 
 ## 6. Construção executada e evidência
 
@@ -177,6 +180,8 @@ from pathlib import Path
 from src.model import DIR_GOLD, TABELAS
 
 gold = {nome: pd.read_parquet(DIR_GOLD / f"{nome}.parquet") for nome in TABELAS}
+if (DIR_GOLD / "fato_populacao.parquet").exists():
+    gold["fato_populacao"] = pd.read_parquet(DIR_GOLD / "fato_populacao.parquet")
 contagens = pd.DataFrame([{"tabela": nome, "linhas": len(tabela),
                            "colunas": len(tabela.columns)}
                           for nome, tabela in gold.items()])
@@ -191,5 +196,7 @@ assert gold["fato_registros_municipio_ano"].registros.sum() == base.nascidos.sum
 **Avaliação:** as seis tabelas foram construídas e conferidas com a trusted,
 inclusive por município-ano-faixa e por município-ano. O código de produção é
 `src/model.py`; as linhas ausentes por quarentena continuam ausentes na fato,
-sem serem preenchidas por zero. O marco seguinte é a síntese descritiva e,
-quando houver hipótese prévia, a análise confirmatória.
+sem serem preenchidas por zero. A sétima tabela existe somente quando a carga
+inclui `--com-populacao`, explicitamente; ela é reconciliada com sua própria
+trusted e não altera as fatos originais. A atividade 02 não pede testar a reserva:
+esse exame cabe à etapa seguinte, com a exposição anterior declarada.

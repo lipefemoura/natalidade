@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.model import ANOS, ModeloInvalido, construir, dimensoes, fatos, reconciliar
+from src.model import ANOS, CHAVES, CONFERENCIA, TABELAS_GOLD, ModeloInvalido, agregada, construir, dimensoes, fatos, reconciliar
 from src.transform import FAIXAS
 
 
@@ -41,6 +41,28 @@ class ModeloTest(unittest.TestCase):
         self.assertEqual(dims["dim_faixa_idade"].faixa_idade_mae.tolist(), FAIXAS)
         self.assertEqual(set(dims["dim_origem_valor"].valor_era_traco), {False, True})
         pd.testing.assert_frame_equal(dims["dim_municipio"], dimensoes(self.base)["dim_municipio"])
+        self.assertEqual(dims["dim_ano"].ano_sk.tolist(), list(ANOS))
+        self.assertIn("decada", dims["dim_ano"])
+
+    def test_listas_da_aula_e_funcao_agregada(self):
+        self.assertEqual(len(CHAVES), 4)
+        self.assertEqual(len(CONFERENCIA), 6)
+        self.assertEqual(len(TABELAS_GOLD), 6)
+        dims = dimensoes(self.base)
+        central, resumo = fatos(self.base, dims)
+        pd.testing.assert_frame_equal(resumo, agregada(central, dims))
+
+    def test_injecao_linha_dimensao_faltando_preserva_gold(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            origem = Path(pasta) / "trusted.parquet"
+            destino = Path(pasta) / "gold"
+            destino.mkdir()
+            marcador = destino / "anterior.txt"
+            marcador.write_text("intacto")
+            self.base.to_parquet(origem, index=False)
+            with self.assertRaisesRegex(ModeloInvalido, "sem dimensão para ano: \\[2024\\]"):
+                construir(origem, destino, remover_ano_dimensao=2024)
+            self.assertEqual(marcador.read_text(), "intacto")
 
     def test_ausencia_de_ano_na_dimensao_e_fail_stop(self):
         dims = dimensoes(self.base, ANOS[:-1])

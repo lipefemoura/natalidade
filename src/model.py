@@ -1,9 +1,14 @@
 """Constrói e reconcilia a camada dimensional gold a partir da trusted."""
 
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import duckdb
 import pandas as pd
 
 from src.prepare import RAIZ, TRUSTED, validar_base
@@ -15,6 +20,25 @@ ANOS = tuple(range(2003, 2025))
 TABELAS = (
     "dim_municipio", "dim_ano", "dim_faixa_idade", "dim_origem_valor",
     "fato_registros", "fato_registros_municipio_ano",
+)
+TABELAS_TRUSTED = ("nascimentos",)
+TABELAS_GOLD = TABELAS
+CHAVES = (
+    ("dim_municipio", "cod_municipio", "municipio_sk"),
+    ("dim_ano", "ano", "ano_sk"),
+    ("dim_faixa_idade", "faixa_idade_mae", "faixa_sk"),
+    ("dim_origem_valor", "valor_era_traco", "origem_sk"),
+)
+CONFERENCIA = (
+    ("linhas_fato_central", "SELECT COUNT(*) FROM trusted", "SELECT COUNT(*) FROM central"),
+    ("nascidos_total", "SELECT SUM(nascidos) FROM trusted", "SELECT SUM(nascidos) FROM central"),
+    ("pares_municipio_ano", "SELECT COUNT(*) FROM (SELECT DISTINCT cod_municipio, ano FROM trusted)",
+     "SELECT COUNT(*) FROM agregada"),
+    ("nascidos_agregada", "SELECT SUM(nascidos) FROM trusted", "SELECT SUM(registros) FROM agregada"),
+    ("idade_ignorada", "SELECT SUM(nascidos) FROM trusted WHERE faixa_idade_mae = 'Ignorada'",
+     "SELECT SUM(registros_idade_ignorada) FROM agregada"),
+    ("celulas_era_traco", "SELECT SUM(CAST(valor_era_traco AS BIGINT)) FROM trusted",
+     "SELECT SUM(celulas_era_traco) FROM agregada"),
 )
 
 
@@ -29,13 +53,20 @@ def dimensoes(base: pd.DataFrame, anos: tuple[int, ...] = ANOS) -> dict[str, pd.
     codigos = base[["cod_municipio", "municipio"]].drop_duplicates()
     if codigos.cod_municipio.duplicated().any():
         raise ModeloInvalido("Código natural aponta para nomes municipais conflitantes.")
-    municipios = codigos.sort_values("cod_municipio").reset_index(drop=True)
-    municipios.insert(0, "municipio_sk", range(1, len(municipios) + 1))
+    with duckdb.connect() as con:
+        con.register("codigos", codigos)
+        municipios = con.sql("""
+            SELECT ROW_NUMBER() OVER (ORDER BY cod_municipio) AS municipio_sk,
+                   cod_municipio, municipio FROM codigos ORDER BY cod_municipio
+        """).df()
+        # Calendário anual, inclusivo, independentemente de haver eventos.
+        dim_ano = con.sql(f"""
+            SELECT ano AS ano_sk, ano, (ano // 10) * 10 AS decada
+            FROM generate_series({anos[0]}, {anos[-1]}) AS calendario(ano)
+            WHERE ano IN ({','.join(map(str, anos))}) ORDER BY ano
+        """).df()
     municipios["uf"] = "MA"
     municipios["regiao"] = "Nordeste"
-
-    dim_ano = pd.DataFrame({"ano": anos})
-    dim_ano.insert(0, "ano_sk", range(1, len(dim_ano) + 1))
 
     dim_faixa = pd.DataFrame({
         "faixa_idade_mae": FAIXAS,
@@ -78,14 +109,8 @@ def fatos(
     dims: dict[str, pd.DataFrame],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Trocar chaves naturais e construir fatos no grão declarado, sem INNER JOIN."""
-    mapa = (
-        ("dim_municipio", "cod_municipio", "municipio_sk"),
-        ("dim_ano", "ano", "ano_sk"),
-        ("dim_faixa_idade", "faixa_idade_mae", "faixa_sk"),
-        ("dim_origem_valor", "valor_era_traco", "origem_sk"),
-    )
     fato = base.copy()
-    for tabela, natural, surrogate in mapa:
+    for tabela, natural, surrogate in CHAVES:
         dim = dims[tabela]
         _conferir_dimensao(fato, dim, natural, surrogate)
         fato = fato.merge(
@@ -99,27 +124,25 @@ def fatos(
         raise ModeloInvalido("A fato central não é única no grão município-ano-faixa-origem.")
     central = fato[chaves + ["nascidos"]].sort_values(chaves).reset_index(drop=True)
 
-    faixas = dims["dim_faixa_idade"][["faixa_sk", "faixa_idade_mae"]]
-    agregada = (
-        central.merge(faixas, on="faixa_sk", how="left", validate="many_to_one")
-        .assign(
-            registros_idade_ignorada=lambda df: df["nascidos"].where(
-                df["faixa_idade_mae"].eq("Ignorada"), 0,
-            ),
-            celulas_era_traco=lambda df: df["origem_sk"].eq(dims["dim_origem_valor"].loc[
-                    dims["dim_origem_valor"]["valor_era_traco"], "origem_sk"
-                ].item()).astype("int64"),
-        )
-        .groupby(["municipio_sk", "ano_sk"], as_index=False, sort=True)
-        .agg(
-            registros=("nascidos", "sum"),
-            registros_idade_ignorada=("registros_idade_ignorada", "sum"),
-            celulas_era_traco=("celulas_era_traco", "sum"),
-        )
-        .sort_values(["municipio_sk", "ano_sk"])
-        .reset_index(drop=True)
-    )
-    return central, agregada
+    # A API retorna ambas para manter compatibilidade; a agregação tem função própria.
+    return central, agregada(central, dims)
+
+
+def agregada(central: pd.DataFrame, dims: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Materializar o resumo município-ano em DuckDB, como na aula de aplicação."""
+    with duckdb.connect() as con:
+        con.register("central", central)
+        con.register("faixas", dims["dim_faixa_idade"])
+        con.register("origens", dims["dim_origem_valor"])
+        return con.sql("""
+            SELECT municipio_sk, ano_sk, SUM(nascidos)::BIGINT AS registros,
+                   SUM(CASE WHEN faixa_idade_mae = 'Ignorada' THEN nascidos ELSE 0 END)::BIGINT
+                       AS registros_idade_ignorada,
+                   SUM(CAST(valor_era_traco AS BIGINT))::BIGINT AS celulas_era_traco
+            FROM central LEFT JOIN faixas USING (faixa_sk)
+                         LEFT JOIN origens USING (origem_sk)
+            GROUP BY municipio_sk, ano_sk ORDER BY municipio_sk, ano_sk
+        """).df()
 
 
 def reconciliar(
@@ -184,26 +207,17 @@ def reconciliar(
         ("ignorada_esperada", "registros_idade_ignorada"),
         ("tracos_esperados", "celulas_era_traco"),
     ]
-    linhas = [{"medida": "linhas_fato_central", "trusted": len(base), "gold": len(central)}]
-    for nome, esquerda, direita in [
-        ("nascidos_total", "nascidos", None),
-        ("pares_municipio_ano", None, None),
-        ("nascidos_agregada", None, "registros"),
-        ("idade_ignorada", "nascidos", "registros_idade_ignorada"),
-        ("celulas_era_traco", "valor_era_traco", "celulas_era_traco"),
-    ]:
-        if nome == "nascidos_total":
-            a, b = int(base[esquerda].sum()), int(central["nascidos"].sum())
-        elif nome == "pares_municipio_ano":
-            a, b = int(esperado.shape[0]), int(agregada.shape[0])
-        elif nome == "nascidos_agregada":
-            a, b = int(base.nascidos.sum()), int(agregada[direita].sum())
-        elif nome == "idade_ignorada":
-            a = int(base.loc[base.faixa_idade_mae.eq("Ignorada"), esquerda].sum())
-            b = int(agregada[direita].sum())
-        else:
-            a, b = int(base[esquerda].sum()), int(agregada[direita].sum())
-        linhas.append({"medida": nome, "trusted": a, "gold": b})
+    linhas = []
+    with duckdb.connect() as con:
+        con.register("trusted", base)
+        con.register("central", central)
+        con.register("agregada", agregada)
+        for nome, consulta_trusted, consulta_gold in CONFERENCIA:
+            a = int(con.sql(consulta_trusted).fetchone()[0])
+            b = int(con.sql(consulta_gold).fetchone()[0])
+            if a != b:
+                raise ModeloInvalido(f"Conferência {nome} divergiu: trusted={a}, gold={b}.")
+            linhas.append({"medida": nome, "trusted": a, "gold": b})
     for origem, destino in medidas:
         if not (comparacao[origem] == comparacao[destino]).all():
             raise ModeloInvalido(f"Reconciliação por município-ano falhou em {destino}.")
@@ -289,6 +303,7 @@ def construir(
     destino: Path = DIR_GOLD,
     anos: tuple[int, ...] = ANOS,
     origem_populacao: Path | None = None,
+    remover_ano_dimensao: int | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Executar fail-stop em memória; nenhuma tabela é publicada antes de reconciliar."""
     if not origem.exists():
@@ -298,6 +313,9 @@ def construir(
         raise ModeloInvalido("Trusted contém ano ausente do calendário dimensional.")
     dims = dimensoes(base, anos)
     _conferir_dominios(dims, anos)
+    if remover_ano_dimensao is not None:
+        # Injeção de falha explícita para a evidência exigida na atividade.
+        dims["dim_ano"] = dims["dim_ano"].loc[dims["dim_ano"].ano.ne(remover_ano_dimensao)]
     central, agregada = fatos(base, dims)
     reconciliacao = reconciliar(base, dims, central, agregada)
     tabelas = {**dims, "fato_registros": central,
@@ -305,6 +323,13 @@ def construir(
     if origem_populacao is not None:
         populacao = pd.read_parquet(origem_populacao)
         tabelas["fato_populacao"] = fato_populacao(populacao, dims)
+        resumo_pop = pd.DataFrame([
+            {"medida": "linhas_populacao", "trusted": len(populacao), "gold": len(tabelas["fato_populacao"])},
+            # Total de células-pessoas só verifica transporte, não pessoas únicas no tempo.
+            {"medida": "soma_celulas_populacao", "trusted": int(populacao.populacao.sum()),
+             "gold": int(tabelas["fato_populacao"].populacao.sum())},
+        ])
+        reconciliacao = pd.concat([reconciliacao, resumo_pop], ignore_index=True)
     _publicar(tabelas, destino)
     for nome, tabela in tabelas.items():
         print(f"{nome:34} {len(tabela):6} linhas -> {destino / (nome + '.parquet')}")
@@ -314,5 +339,15 @@ def construir(
 
 
 if __name__ == "__main__":
-    populacao = RAIZ / "data/trusted/populacao.parquet"
-    construir(origem_populacao=populacao if populacao.exists() else None)
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--com-populacao", action="store_true", help="Incluir extensão populacional explicitamente")
+    parser.add_argument("--remover-ano-dimensao", type=int, help="Teste fail-stop: simular linha de dimensão faltando")
+    args = parser.parse_args()
+    populacao = RAIZ / "data/trusted/populacao.parquet" if args.com_populacao else None
+    try:
+        construir(origem_populacao=populacao, remover_ano_dimensao=args.remover_ano_dimensao)
+    except ModeloInvalido as erro:
+        print(f"FAIL-STOP: {erro}\nNada foi gravado em data/gold/.", file=sys.stderr)
+        sys.exit(1)

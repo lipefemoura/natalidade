@@ -1,0 +1,289 @@
+---
+title: "Atividade prática da Etapa 2: da camada trusted ao gold"
+subtitle: "Introdução à Ciência de Dados · Sistemas de Informação · IFMA"
+author:
+  - "Gustavo dos Santos Bandeira Rocha · 20231SI0006"
+  - "Deusiane Pimenta Rocha · 20231SI0032"
+  - "Felipe Moura de Oliveira · 20231SI0027"
+date: "2026-11-21"
+lang: pt-BR
+format:
+  typst:
+    papersize: a4
+    fontsize: 9pt
+    margin:
+      x: 1.5cm
+      y: 1.3cm
+    toc: false
+    number-sections: false
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+import json
+import pandas as pd
+from IPython.display import display, Markdown
+from src.population import RAIZ
+
+evidencia = json.loads((RAIZ / "relatorios/evidencias-etapa-2.json").read_text())
+```
+
+Repositório: https://github.com/lipefemoura/natalidade · Branch de entrega: **etapa-2**.
+Professor: Dr. Josenildo Silva. Revisão baseada no enunciado da atividade 02 e nas aulas 02–05 e 07–10.
+
+## 1. A coleta e o que mudou desde a Etapa 1
+
+**Pergunta original:** entre 2003 e 2024, em que municípios do Maranhão e faixas
+de idade materna os registros de nascidos vivos mais caíram? Fonte principal:
+IBGE/SIDRA 2609, variável 217, UF 21, sem chave. A coleta analisada é a raw de
+**16/11/2026**, com 22 JSON e 219.604 células, 217 municípios. O relatório da
+Etapa 1 mencionava 05/10/2026; adotamos a data dos envelopes atuais, sem afirmar
+que as duas coletas são idênticas. Não foi localizado retorno docente específico
+com correções exigidas: **nenhum valor da trusted foi alterado nesta revisão**.
+
+| Indicador | Antes da revisão | Depois |
+|---|---:|---:|
+| Linhas trusted (município-ano-faixa) | 47.110 | 47.110 |
+| Registros aprovados (soma de nascidos) | 2.773.381 | 2.773.381 |
+| Linhas em quarentena | 630 | 630 |
+| Pares município-ano aprovados | 4.711 | 4.711 |
+
+**Por que tratar assim:** a raw mistura Total, faixas e idades simples; mantemos
+somente dez faixas mutuamente exclusivas para não contar registros duas vezes.
+Traço publicado significa zero e recebe indicador de origem. “Ignorada” é
+mantida porque removê-la reduziria o total e inventar idade seria imputação sem
+evidência. Quarentena herdada compara participação municipal com a mediana da
+série (<0,25 ou >3 vezes); remove o município-ano inteiro, não só uma faixa,
+preservando motivo/horário. Lacuna não vira zero. Símbolo ou estrutura inesperada
+interrompe a carga. Extremos legítimos não são winsorizados.
+
+**Por que outra fonte:** a hipótese adicional “há correlação entre crescimento
+da cidade e queda da taxa de natalidade” precisa de população como exposição.
+A API Agregados v3, tabela 6579/variável 9324, coletada em **19/11/2026**, produziu
+3.906 células (217 municípios × 18 anos), todas aprovadas; 2007, 2010, 2022 e 2023
+não são publicados. Não interpolamos nem misturamos censos de outra referência.
+78 mudanças anualizadas >10% foram apenas sinalizadas, não removidas. Essa fonte
+é **extensão opcional**, não substitui a fonte principal exigida no enunciado.
+Registro no ano inclui nascimento anterior: o quociente é registros/mil
+habitantes, não uma taxa de natalidade por ocorrência validada.
+
+## 2. A exploração
+
+Corte: **2003–2020 exploratório; 2021–2024 separado** por tempo para não embaralhar
+passado e futuro. As consultas usam views `base`, `totais` e `balanceada`, que
+excluem a reserva. A varredura vai de uma coluna às relações de duas, terceira
+coluna e tabela cruzada (`describe`, `value_counts`, `groupby/agg`, `crosstab`).
+Coorte de 193 municípios completos em 2003–2020 evita atribuir mudança de
+cobertura à queda: nessa coorte o recuo 2003–2020 é 43,39% (42,37% com cobertura
+variável). A quarentena exploratória foi relida, sem nova exclusão dirigida.
+
+| Pergunta / expectativa | Previsão organizada para comparação posterior |
+|---|---|
+| P1. Recuo persiste na mesma coorte? Espera-se queda. | Média anual 2021–2024 menor que 2003–2020, mesmos municípios |
+| P2. Perfil materno muda? Espera-se aumento de 30+. | Participação 30+ maior em 2021–2024, razão das somas da mesma coorte |
+| P3. Idade ignorada distorce? Espera-se parcela pequena/variável. | Participação Ignorada <2% na reserva, sem redistribuir registros |
+
+**Limite essencial:** esses anos já foram usados em diagnóstico, alvo 2021,
+pontas/valores-p e quarentena global. As previsões desta revisão são
+pós-exploratórias. A reserva não foi testada neste documento, mas **não recuperou
+independência**. Não alegamos cumprimento literal de reserva intocada ou perguntas
+prospectivas; a confirmação da Etapa 3 dependerá de novo dado/período. Perguntas
+para depois: registro tardio, São Luís/2003, migração, estrutura etária e revisão
+de limites da quarentena sem usar futuro.
+
+{{< pagebreak >}}
+
+## 3. O desenho do modelo
+
+### 3.1 Processo de negócio
+
+**Registrar nascidos vivos em cartório.** A tabela agrega esse processo por
+município, ano de registro e idade materna; não descreve um evento individual
+identificável. A extensão observa **estimar a população residente** por
+município-ano, um processo distinto.
+
+### 3.2 Granularidade e por que não outra
+
+**Uma linha da fato central representa a contagem de registros de um município
+do Maranhão em um ano e uma faixa de idade materna.** Não escolhemos só
+município-ano porque a pergunta “qual faixa mais caiu?” perderia a idade e não
+poderia ser respondida do resumo. Também não inventamos linha por criança:
+não há evento individual na fonte. A origem do valor é contexto da célula,
+não desagregação adicional de nascimentos.
+
+### 3.3 Dimensões e atributos para filtrar/agrupar
+
+| Dimensão | Chave | Atributos e pertinência ao grão |
+|---|---|---|
+| dim_municipio | municipio_sk | Nome, UF e região; código natural IBGE de sete dígitos |
+| dim_ano | ano_sk = ano | Ano e década; calendário anual 2003–2024 inclusive |
+| dim_faixa_idade | faixa_sk | Faixa, ordem e idade conhecida; Ignorada é membro explícito |
+| dim_origem_valor | origem_sk | Indicador de traço e descrição da publicação; contexto de qualidade |
+
+Município e ano também servem à população; faixa e origem de registro **não**.
+O calendário usa `generate_series` inclusivo, não os anos observados na fato.
+Não inventamos dias/meses. Ano usa a chave natural, como a dimensão data da aula;
+as demais têm SK determinística na reconstrução integral (`ROW_NUMBER` ou
+domínio ordenado). Carga incremental exigiria mapa persistente de chaves.
+
+### 3.4 Medidas: classes e conta correta
+
+| Fato / medida | Classe e interpretação |
+|---|---|
+| fato_registros.nascidos | Aditiva entre municípios, faixas exclusivas e anos de registro; não nascimentos ocorridos |
+| fato_registros_municipio_ano.registros | Soma das dez faixas, aditiva; não somar junto com fato detalhada |
+| registros_idade_ignorada | Contagem aditiva de registros com idade desconhecida |
+| celulas_era_traco | Contagem aditiva de células originalmente com traço, não de pessoas |
+| fato_populacao.populacao (opcional) | Semiaditiva: soma entre municípios no mesmo ano, não no tempo |
+
+IDs, SK, tabela e variável identificam membros/proveniência, **não são medidas**.
+Participação ignorada, queda percentual e registros/mil habitantes são razões
+calculadas na consulta: razão das somas no mesmo conjunto, não soma/média simples
+de taxas. Base zero ou denominador ausente gera indicador indefinido, não zero.
+
+### 3.5 O que é de outra granularidade e onde ficou
+
+`total_municipio_ano` repete dez vezes na trusted; não entra na fato central.
+A agregada o reconstrói somando `nascidos`, evitando inflação por fator dez.
+População é município-ano, não município-ano-faixa; fica em **fato própria**,
+jamais repetida pelas idades. A integração primeiro agrega registros, depois
+faz LEFT JOIN 1:1 e audita com OUTER JOIN: 3.850 pares presentes nas duas fontes,
+56 populações sem registros aprovados e 861 pares de registros sem população.
+
+### 3.6 A fato agregada e informação perdida
+
+Pergunta atendida: **como evolui a contagem municipal anual?** Grão: uma linha
+por município-ano. Permanecem filtros município, UF/região, ano/década;
+perdem-se `faixa_sk` e `origem_sk`, portanto não se recupera a distribuição
+etária ou a origem de cada célula do resumo. A conferência compara cada par
+com a central; preserva soma, idade ignorada e quantidade de traços.
+
+**Desenho e gold:** seis tabelas obrigatórias (quatro dimensões, duas fatos);
+a opção `--com-populacao` acrescenta somente a sétima tabela descrita acima.
+O comando padrão do enunciado independe de população. A execução normal da
+página seguinte inclui explicitamente a extensão, e seu inventário corresponde
+aos sete Parquets atuais. Gold é produzida somente por `src/model.py`.
+
+{{< pagebreak >}}
+
+### 3.7 Duas saídas reais exigidas e reconstrução
+
+**Execução normal:** `uv run python src/model.py --com-populacao`.
+Saída registrada pelo mesmo `construir()`; caminhos absolutos foram omitidos
+apenas para caber. A evidência integral e os hashes estão em
+`relatorios/evidencias-etapa-2.json`.
+
+```{python}
+normal = "\n".join(linha.split(" -> ")[0] for linha in evidencia["normal"].splitlines())
+display(Markdown("```text\n" + normal + "\n```"))
+```
+
+`soma_celulas_populacao` confere transporte das células; **não representa
+pessoas únicas somadas ao longo do tempo**. A reconciliação populacional também
+é feita célula a célula. As listas `TABELAS_TRUSTED`, `TABELAS_GOLD`, `CHAVES`
+e `CONFERENCIA` são explícitas; funções `dimensoes()`, `fatos()` e `agregada()`
+seguem a ordem da aula. Por compatibilidade com testes anteriores, `fatos()`
+retorna central e resumo, delegando este último à função `agregada()`.
+
+**Execução com uma linha da dimensão faltando:**
+`uv run python src/model.py --com-populacao --remover-ano-dimensao 2024`.
+A opção injeta a falha só em memória; a execução seguinte sem a opção não tem
+a alteração. A verificação usa a CLI real, não uma mensagem fabricada.
+
+```{python}
+display(Markdown("```text\n" + evidencia["falha_dimensao"] + "\n```"))
+```
+
+Código de saída **1**; os hashes da gold antes e depois permaneceram iguais.
+O ano órfão é identificado **antes de gravar**, não descartado por INNER JOIN.
+A conferência de contagem/soma não substitui a de chaves; ambas são executadas.
+Publicação em staging, releitura integral de tipos/valores e troca do diretório
+ocorrem somente após reconciliação. Uma segunda reconstrução, após apagar a gold
+temporária, produziu **os mesmos sete hashes SHA-256**, portanto conteúdo e
+bytes idênticos nesta versão/ambiente.
+
+**Reprodução limpa em 21/11/2026:** uma cópia temporária do código/configuração,
+sem raw, trusted ou gold prévias, executou a sequência oficial com nova coleta
+online; o projeto de referência conservou a raw de 16/11. Não foi uma afirmação
+de clone remoto/acesso do professor: isso depende da equipe.
+
+```{python}
+for passo in evidencia.get("reproducao_limpa", []):
+    print(f"[saída {passo['codigo_saida']}] {passo['comando']}")
+```
+
+O `uv.lock` fixa dependências; `.env.example` informa que não há chave;
+`.gitignore` exclui credenciais, ambiente e dados. Documentos Quarto ficam em
+`analises/`, `_quarto.yml` define execução na raiz. A nova branch deixa /docs
+fora do rastreamento; não reescreve commits anteriores. A suíte automatizada
+com **49 testes** passou: grão, faixas completas, falhas sem publicação,
+reconciliação, round-trip, duplicação, faltantes, X/y temporal e p-valores.
+
+{{< pagebreak >}}
+
+## 4. Onde a equipe travou e o que permaneceu aberto
+
+**Revisão de escopo:** antes de localizar o enunciado da atividade 02, o projeto
+seguia somente os desafios das aulas. Os QMD estavam na raiz, faltavam blocos
+formais da exploração, listas de carga e evidências no PDF; o README ainda dizia
+75%. Reorganizamos com `git mv`, introduzimos views e perguntas/crosstabs na
+ordem da aula, extraímos `agregada()` e adotamos DuckDB nas dimensões/agregação e
+conferências. Calendário deixou de usar SK sequencial para usar o ano natural.
+
+**Reprodutibilidade:** executar `python src/model.py` não podia depender do
+modo `python -m src.model`; corrigimos o caminho de importação para aceitar a
+sequência oficial. Parquet exige cabeçalhos textuais no pivot anual e índice
+de colunas sem nome; o round-trip foi normalizado. Figuras antes cortadas foram
+ajustadas com `tight_layout` e largura de saída. A gold agora tem opção explícita
+para população; a sequência principal não muda silenciosamente por existir
+outra trusted na máquina.
+
+**Fonte e diagnóstico:** SIDRA recusava classificação em query string sem erro;
+os filtros da coleta original ficam no caminho. A API de população tem períodos
+ausentes e revisões intercensitárias. Mantivemos lacunas e sinalizações em vez
+de interpolar, corrigir extremos legítimos ou alegar harmonização inexistente.
+São Luís/2003 com 57,02% em 25–29 permanece sem explicação satisfatória. Não
+retiramos a cidade da trusted por conveniência estatística.
+
+**Hipótese adicional e estatística:** nos 203 municípios pareados 2003/2024,
+Pearson crescimento × queda de registros/mil = **0,2886**, p bilateral
+**0,00002973**, IC95% nominal [0,1571; 0,4100]; Spearman = **0,1678**, p=0,01669.
+Após Holm na família de 24 testes, p=0,0003271 e 0,09558. Em 2011–2021,
+Pearson p=0,8518: a associação depende da janela. Numerador fixo com denominador
+variável ainda gera Pearson 0,8436, mostrando acoplamento matemático. São análises
+**já realizadas, exploratórias**, em anexo separado, não confirmação das previsões
+da reserva nesta atividade. A aula 10 ensina bootstrap/permutação com grupos;
+os testes SciPy de correlação são uma extensão nominal, não substituição fiel
+desse exercício ou teste causal. Dependência espacial não foi validada.
+
+**Sem solução retroativa:** a parte separada já foi vista; perguntar antes de
+novas consultas não transforma expectativas pós-exploratórias em prévias.
+Quarentena utiliza a série inteira. A revisão atende à estrutura técnica, mas
+**não garante nota cheia no critério de exploração**, cujo requisito de reserva
+intocada não pode ser recriado honestamente. A atividade não exige confirmar
+hipótese: exige organizar previsões para depois. Para confirmar natalidade,
+é preciso numerador por ocorrência/residência, janela compatível, decisão
+prospectiva e incerteza que considere dependência. Acesso do professor ao repo
+e envio no Classroom são tarefas externas ainda a cargo da equipe.
+
+## 5. Uso de IA
+
+Foi utilizado **GitHub Copilot** para ler materiais, comparar requisitos com
+código, estruturar coleta populacional, contratos/quarentena, preparar views,
+modelo dimensional, testes, relatório e revisar interpretação estatística.
+Decisões e limitações foram confrontadas com envelopes/metadados, execução real,
+testes, hashes e renderização. A IA não confirmou causalidade nem substituiu
+validação acadêmica. Nomes/matrículas vieram do relatório da Etapa 1; argumentos,
+evidências e submissão exigem revisão e responsabilidade dos integrantes.
+
+**Síntese:** fluxo fonte → raw → trusted/quarentena → gold reprodutível,
+com granularidades preservadas e decisões justificadas. A extensão populacional
+é útil para o denominador, mas não autoriza chamar registros por habitante de
+natalidade por ocorrência. Entregas técnicas foram revisadas; reserva exposta e
+retorno docente ausente são pendências declaradas, não escondidas como sucesso.
+
+Referências: IBGE/SIDRA tabelas 2609 e 6579; documentação oficial Agregados v3;
+enunciado Atividade prática da Etapa 2 (05/11/2026); aulas de coleta/validação,
+Tidy Data, Star Schema/aplicação e Análise disponibilizadas pelo professor.

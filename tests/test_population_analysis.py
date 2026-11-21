@@ -5,7 +5,7 @@ import unittest
 import pandas as pd
 
 from src.model import ModeloInvalido, construir, dimensoes, fato_populacao
-from src.population_analysis import correlacoes, flat_temporal, integrar, parear
+from src.population_analysis import ajustar_holm, correlacoes, flat_temporal, integrar, parear
 from src.transform import FAIXAS
 
 
@@ -60,7 +60,32 @@ class IntegracaoPopulacaoTest(unittest.TestCase):
         self.assertAlmostEqual(corr.pearson.iloc[0], 1)
         self.assertAlmostEqual(corr.spearman.iloc[2], -1)
         self.assertTrue(pd.isna(corr.pearson.iloc[1]))
+        self.assertTrue(pd.isna(corr.pearson_p_bilateral.iloc[1]))
+        self.assertTrue(pd.isna(corr.spearman_p_bilateral.iloc[1]))
         self.assertEqual(corr.status.iloc[1], "amostra_ou_variacao_insuficiente")
+
+    def test_p_bilateral_pearson_com_valor_conhecido(self):
+        # n=5, r=0,8 => t=2,309401, gl=3, p bilateral=0,104088.
+        pares = pd.DataFrame({"crescimento_pop_pct": [1, 2, 3, 4, 5],
+                              "queda_indicador_por_mil": [1, 3, 2, 5, 4],
+                              "queda_registros_pct": [1, 3, 2, 5, 4],
+                              "queda_denominador_constante_numerador": [5, 3, 4, 1, 2]})
+        corr = correlacoes(pares, "teste")
+        self.assertAlmostEqual(corr.pearson.iloc[0], .8)
+        self.assertAlmostEqual(corr.pearson_p_bilateral.iloc[0], .10408803866182788)
+        self.assertAlmostEqual(corr.spearman_p_bilateral.iloc[0], .10408803866182788)
+        self.assertLess(corr.pearson_ic95_inferior.iloc[0], .8)
+        self.assertGreater(corr.pearson_ic95_superior.iloc[0], .8)
+
+    def test_holm_familia_conjunta_e_preserva_ausencia(self):
+        tabela = pd.DataFrame({"pearson_p_bilateral": [.01, .04],
+                               "spearman_p_bilateral": [.03, float("nan")]})
+        ajustada = ajustar_holm(tabela)
+        self.assertAlmostEqual(ajustada.pearson_p_holm.iloc[0], .04)
+        self.assertAlmostEqual(ajustada.spearman_p_holm.iloc[0], .09)
+        self.assertAlmostEqual(ajustada.pearson_p_holm.iloc[1], .09)
+        self.assertTrue(pd.isna(ajustada.spearman_p_holm.iloc[1]))
+        pd.testing.assert_frame_equal(tabela, ajustada[tabela.columns])
 
     def test_alvo_futuro_nao_altera_x(self):
         painel, _ = integrar(*bases())

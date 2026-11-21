@@ -1,0 +1,2 @@
+# PDF gerado é binário; não aplicar diff textual ou normalização de linhas.
+*.pdf binary

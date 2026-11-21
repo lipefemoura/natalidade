@@ -1,210 +1,190 @@
-# natalidade
+# Natalidade — Maranhão
 
-Projeto da disciplina Introdução à Ciência de Dados (Sistemas de Informação, IFMA).
+Introdução à Ciência de Dados · Sistemas de Informação · IFMA.
 
-**Pergunta analítica:** entre 2003 e 2024, em que municípios do Maranhão e em que faixas
-de idade da mãe os nascimentos registrados mais caíram?
+**Pergunta original:** entre 2003 e 2024, em que municípios do Maranhão e faixas
+de idade materna os registros de nascidos vivos mais caíram?
 
-**Fonte:** IBGE, API do SIDRA, [tabela 2609](https://sidra.ibge.gov.br/tabela/2609)
-(Estatísticas do Registro Civil): nascidos vivos registrados no ano, por município do
-Maranhão e idade da mãe na ocasião do parto, de 2003 a 2024.
+**Equipe:** Gustavo dos Santos Bandeira Rocha (20231SI0006), Deusiane Pimenta
+Rocha (20231SI0032), Felipe Moura de Oliveira (20231SI0027).
 
-## Chave de acesso
+## Entrega da atividade 02
 
-A fonte não exige chave nem cadastro. O `.env.example` existe apenas por convenção do
-projeto e não declara variáveis.
+- [Relatório em PDF](relatorios/relatorio-etapa-2.pdf): cinco partes do enunciado,
+  motivos das decisões, dificuldades, desenho e duas saídas reais do modelo.
+- [Fonte do relatório](relatorios/relatorio-etapa-2.qmd).
+- [Revisão dos requisitos e funções das aulas](relatorios/revisao-etapa-2.md).
+- [Evidências de execução e SHA-256](relatorios/evidencias-etapa-2.json).
 
-## Como executar
+**Status:** núcleo técnico revisado, 49 testes aprovados, sequência oficial
+verificada em cópia limpa com nova coleta. **Não se garante cumprimento literal
+da reserva intocada:** diagnóstico, quarentena global, alvo 2021 e análises
+anteriores já examinaram 2021–2024. Essa exposição não pode ser desfeita. As
+previsões desta revisão são pós-exploratórias; não foram confirmadas na exploração.
+O enunciado reserva confirmação à Etapa 3, não exige confirmar hipótese na Etapa 2.
 
-Requer o [uv](https://docs.astral.sh/uv/).
+Branch: **etapa-2**. Nenhum documento de /docs é rastreado nesta branch. A equipe
+ainda deve conferir acesso privado do professor (`josenildosilva`) e enviar
+link/PDF no Classroom. Não foi feito push nem convite automático.
+
+## Fonte principal e chave de acesso
+
+IBGE/SIDRA [tabela 2609](https://sidra.ibge.gov.br/tabela/2609), variável 217,
+Estatísticas do Registro Civil, municípios do Maranhão (UF 21), 2003–2024.
+Conta **nascidos vivos registrados no ano**, inclusive nascimentos anteriores.
+Sem chave/cadastro; [.env.example](.env.example) é informativo, sem credenciais.
+
+## Reprodução: sequência oficial do clone ao gold
+
+Requer [uv](https://docs.astral.sh/uv/). Executar a partir da raiz:
 
 ```bash
-git clone https://github.com/lipefemoura/natalidade.git
+git clone --branch etapa-2 https://github.com/lipefemoura/natalidade.git
 cd natalidade
 uv sync
 uv run python src/ingest.py
-uv run quarto render diagnostico.qmd
+uv run quarto render analises/diagnostico.qmd
 uv run python src/transform.py
+uv run quarto render analises/exploracao.qmd
+uv run python src/model.py
 ```
 
-## O que cada etapa produz
+Não é necessário copiar ou preencher .env. `_quarto.yml` mantém execução dos QMD
+na raiz, mesmo com documentos em `analises/`. Em reprodução limpa de 21/11/2026,
+todos os seis comandos pós-clone retornaram saída 0, com raw/trusted/gold novas.
+Essa verificação foi de uma cópia limpa, não do acesso remoto privado.
 
-| Etapa | Saída |
+### O que cada etapa faz
+
+| Etapa | Artefatos e decisões |
 |---|---|
-| `src/ingest.py` | `data/raw/ibge_sidra_2609/AAAA-MM-DD/uf21_ANO.json`: um arquivo por ano, com a resposta original da API e a proveniência (fonte, URL, data da coleta). A pasta leva a data da execução. |
-| `diagnostico.qmd` | `diagnostico.html`: perfil, duplicatas, tabela de decisão e tratamento do dado bruto. Grava também `data/quarentena/atipicos-municipio-ano.csv`. |
-| `src/transform.py` | `data/trusted/nascimentos.parquet` e `data/quarentena/rejeitados.parquet`, descritos abaixo. Ao final, imprime quantas linhas foram para cada arquivo e o total por motivo de rejeição. |
+| [src/ingest.py](src/ingest.py) | JSON por ano em raw/ibge_sidra_2609/AAAA-MM-DD, fonte/URL/horário UTC; timeout/retry e cache diário |
+| [analises/diagnostico.qmd](analises/diagnostico.qmd) | Perfil, duplicação, decisões e diagnóstico; CSV de municípios-ano atípicos |
+| [src/transform.py](src/transform.py) | Contrato Pandera, trusted e quarentena; dez faixas sem Total/idades simples; traço vira zero marcado |
+| [analises/exploracao.qmd](analises/exploracao.qmd) | Views sem reserva; perguntas e expectativas; varredura, crosstabs, quarentena e previsões para depois |
+| [src/model.py](src/model.py) | Dimensões/fatos/agregada, conferência de chaves e medidas, staging/releitura e Parquets gold |
 
-### `data/trusted/nascimentos.parquet`
+### Dicionário trusted e quarentena
 
-Uma linha por município, ano e faixa de idade da mãe, validada pelo contrato do `transform.py`.
+Grão: **município × ano × faixa materna**, 47.110 linhas na coleta de referência
+16/11/2026; soma de registros aprovados = 2.773.381. Colunas:
 
-| Coluna | Tipo | Conteúdo |
-|---|---|---|
-| `cod_municipio` | texto | código IBGE do município (7 dígitos, começando com 21) |
-| `municipio` | texto | nome do município |
-| `ano` | inteiro | ano do registro, de 2003 a 2024 |
-| `faixa_idade_mae` | texto | uma de dez categorias: nove faixas de idade e "Ignorada" |
-| `nascidos` | inteiro | nascidos vivos registrados no ano |
-| `valor_era_traco` | lógico | verdadeiro quando o IBGE publicou `-`, convertido em 0 |
-| `total_municipio_ano` | inteiro | total de registros do município no ano (soma das dez faixas) |
+| Coluna | Tipo e significado |
+|---|---|
+| cod_municipio | Texto, código IBGE de sete dígitos, prefixo 21 |
+| municipio | Nome, sem sufixo UF |
+| ano | Inteiro, ano do registro 2003–2024 |
+| faixa_idade_mae | Nove faixas de idade e Ignorada |
+| nascidos | Inteiro não negativo, registros |
+| valor_era_traco | Booleano, zero originalmente publicado como traço |
+| total_municipio_ano | Inteiro, total municipal repetido dez vezes; NÃO somar sobre faixas |
 
-Os valores são registros em cartório no ano, e não nascimentos ocorridos no ano: o registro tardio, de crianças nascidas em anos anteriores, explica boa parte da queda entre 2003 e 2024.
+Quarentena tem as mesmas colunas, `motivo` e `detectado_em` UTC (630 linhas,
+63 municípios-ano na referência). Reprovação de uma faixa leva o par inteiro
+para evitar soma parcial. Motivos: participação atípica <0,25 ou >3 vezes a
+mediana municipal; violação de contrato; faixa que acompanha outra reprovada.
+Mudança estrutural/símbolo desconhecido interrompe sem publicar trusted nova.
+Não se imputam lacunas nem se apagam extremos legítimos por conveniência.
 
-### `data/quarentena/rejeitados.parquet`
+## Tabelas em data/gold/
 
-As mesmas colunas, mais `motivo` (a regra que reprovou a linha) e `detectado_em` (data e hora da execução, em UTC). Um município e ano reprovados vão inteiros, com as dez faixas. Motivos possíveis:
+| Tabela | Grão, chave e medidas |
+|---|---|
+| dim_municipio | 217 municípios; municipio_sk, código/nome/UF/região |
+| dim_ano | 22 anos 2003–2024 inclusive; ano_sk = ano natural, década |
+| dim_faixa_idade | Dez faixas; faixa_sk, rótulo/ordem/idade conhecida |
+| dim_origem_valor | Duas origens; origem_sk, indicador de traço/descrição |
+| fato_registros | 47.110 células; município/ano/faixa/origem, nascidos |
+| fato_registros_municipio_ano | 4.711 pares; município/ano, registros, registros_idade_ignorada, celulas_era_traco |
 
-- `participacao_atipica_no_municipio`: participação do município no total do estado abaixo de 0,25 ou acima de 3 vezes a sua participação mediana;
-- violações do contrato, com o nome da regra (por exemplo, `soma_das_faixas_difere_do_total`);
-- `municipio_ano_com_faixa_reprovada`: faixas que acompanham outra faixa reprovada do mesmo município e ano.
+O comando padrão gera **seis arquivos**, sem depender da população opcional.
+Somente `src/model.py` produz a gold. A dimensão anual usa `generate_series`
+inclusivo independentemente de eventos. Outras SK são determinísticas para
+reconstrução integral. `TABELAS_TRUSTED`, `TABELAS_GOLD`, `CHAVES`, `CONFERENCIA`
+e `dimensoes()`, `fatos()`, `agregada()` seguem a organização da aula 09.
+`fatos()` preserva a API anterior de retorno central/resumo, delegando o resumo
+à função `agregada()`. Medidas são conferidas por soma e por grupo, não só globalmente.
 
-Uma mudança de estrutura na origem (coluna nova ou faltando, símbolo desconhecido no valor) interrompe o `transform.py` sem gravar nada.
+## Verificações e documentos complementares
 
-## Estrutura
-
+```bash
+uv run python -m unittest discover -s tests -v
+uv run python -m src.prepare
+uv run quarto render analises/tidy.qmd
+uv run quarto render analises/estrela.qmd
+# Falha esperada: ano ausente; encerra com código 1 e preserva gold
+uv run python src/model.py --remover-ano-dimensao 2024
 ```
-data/raw/          dado bruto, imutável (fora do git, recriado pelo ingest.py)
-data/trusted/      dado tratado e validado (recriado pelo transform.py)
-data/quarentena/   linhas reprovadas, com motivo (recriado pelo transform.py)
-src/ingest.py      da fonte para data/raw/
-src/transform.py   de data/raw/ para data/trusted/
-diagnostico.qmd    diagnóstico do dado bruto
-```
 
-## Etapa 2 — andamento (aproximadamente 75%)
+[src/prepare.py](src/prepare.py) publica tabelas exploratórias, pivot/melt
+reversível e flat temporal em data/analysis/. X usa 2018–2020, y indica queda
+em 2021. Código/nome/futuro não entram em X; não há treinamento. Essa separação
+local não desfaz a seleção global da quarentena nem o uso anterior da reserva.
 
-### Nova hipótese e fonte populacional
+## Extensão populacional (opcional, além do núcleo da atividade)
 
-**Hipótese:** “Há correlação entre o crescimento da cidade e a queda da taxa de
-natalidade”. A população residente estimada (IBGE Agregados v3, tabela 6579,
-variável 9324) foi adicionada como fonte municipal independente. A documentação
-completa, contrato, limitações e decisões estão em [docs/populacao.md](docs/populacao.md)
-e o diagnóstico reproduzível em [diagnostico-populacao.qmd](diagnostico-populacao.qmd).
+**Hipótese adicional:** há correlação entre crescimento da cidade e queda da
+taxa de natalidade. Crescimento aqui significa população residente, não
+urbanização/PIB. A fonte IBGE Agregados v3
+[6579/9324](https://servicodados.ibge.gov.br/api/v3/agregados/6579/metadados)
+fornece 3.906 células (217 municípios × 18 anos publicados), coleta 19/11/2026.
+Não publica 2007/2010/2022/2023; sem interpolação/mistura com censos. Nenhuma
+linha rejeitada; 78 saltos anualizados >10% apenas sinalizados.
 
 ```bash
 uv run python -m src.population
-uv run quarto render diagnostico-populacao.qmd
-# Para reprocessar sem rede:
+# Ou, se a raw já existe e não se deseja nova coleta:
 uv run python -m src.population --offline
-```
-
-A fonte publica 18 dos 22 anos de 2003–2024; 2007, 2010, 2022 e 2023 ficam
-ausentes, **sem interpolação ou substituição por censos**. A população tem grão
-município-ano e nunca deve ser somada sobre as faixas etárias dos registros.
-O numerador existente mede registros (inclusive tardios), não nascimentos por
-ocorrência: registros por mil habitantes **não são taxa bruta de natalidade**.
-A hipótese literal depende de fonte compatível de nascimentos; uma análise do
-indicador substituto deve ser explicitamente exploratória e não causal.
-
-### Segunda etapa com as duas fontes
-
-```bash
+uv run quarto render analises/diagnostico-populacao.qmd
+uv run python src/model.py --com-populacao
 uv run python -m src.population_analysis
-uv run quarto render hipotese-populacao.qmd
-uv run python -m unittest discover -s tests -v
+uv run quarto render analises/hipotese-populacao.qmd
 ```
 
-[src/population_analysis.py](src/population_analysis.py) reconstrói a gold com
-`fato_populacao` separada (dimensões município/ano conformadas), valida/reconcilia
-as medidas e publica oito Parquets em `data/analysis/hipotese_populacao/`:
-painel, cobertura OUTER JOIN, pontas pareadas, correlações, correlações anuais,
-flat temporal, X e y. Os Parquets são relidos antes da publicação. O relatório
-[hipotese-populacao.qmd](hipotese-populacao.qmd) apresenta exploração, Tidy/flat,
-modelo dimensional, Pearson/Spearman descritivos e sensibilidades. Queda positiva
-é indicador inicial menos final. Um controle aritmético explicita a associação
-mecânica causada pela população no denominador. **Não há teste confirmatório.**
+`--com-populacao` gera a **sétima tabela** `fato_populacao`, no grão município-ano,
+com população e identificadores tabela/variável; compartilha dim_municipio e
+dim_ano. População é somável entre municípios do mesmo ano, não ao longo do
+tempo; nunca é repetida por faixa. `src.population_analysis` chama a construção
+do próprio `src/model.py`, não gera gold por outro meio. O painel agrega primeiro
+registros e depois audita LEFT/OUTER JOIN 1:1. Saídas: painel, cobertura, pontas,
+correlações, correlações anuais, flat, X e y em data/analysis/hipotese_populacao/.
 
-Na amostra de 203 municípios pareados em 2003/2024, crescimento × queda do
-indicador apresenta Pearson **0,2886** e Spearman **0,1678**. Na janela 2011–2021,
-os valores são **0,0129** e **−0,0741**. A dependência da janela e o acoplamento
-matemático do denominador impedem interpretar isso como confirmação da hipótese.
+O [relatório de extensão](analises/hipotese-populacao.qmd) preserva análises
+**anteriores/pós-exploratórias**, não confirmação nova da reserva desta atividade.
+2003–2024 (203 municípios): Pearson 0,2886, p bilateral 0,00002973, IC95%
+nominal [0,1571; 0,4100]; Spearman 0,1678, p=0,01669. Holm em 24 testes de pontas
+produz p=0,0003271/0,09558; anuais têm família separada. Em 2011–2021 os valores-p
+são 0,8518/0,2825. Testes nominais não corrigem seleção, dependência espacial ou
+acoplamento matemático (controle numerador fixo: Pearson 0,8436).
 
-O comando `src.model` também inclui a fato populacional quando sua trusted
-existe; a API `construir` preserva o modo anterior sem população por padrão.
+**Não se confirma natalidade literal** com o indicador de registros por mil:
+registro tardio, migração, estrutura etária e revisões são limitações. Testar
+correlação nula não prova mecanismo causal. A aula 10 ensina comparação por
+bootstrap/permutação; esses laços de grupos não foram alegados como implementados.
+Os testes SciPy são complemento explicitamente nominal, não requisito da atividade 02.
 
-Escopo adotado a partir dos desafios das aulas: **1. exploração; 2. Tidy Data e
-flat table; 3. desenho dimensional; 4. construção/reconciliação da gold; início
-da análise descritiva pareada**. Os materiais locais contêm exercícios teóricos
-da Etapa 2, não um enunciado prático próprio. Ainda faltam **inferência
-confirmatória e síntese/relatório final**. Não há algoritmo treinado nem
-confirmação de hipótese.
-
-Depois de executar a primeira etapa, na raiz do projeto:
+## Gerar PDF e evidências da entrega
 
 ```bash
-uv sync
-uv run python -m src.prepare
-uv run python -m src.model
-uv run python -m src.analyze
-uv run python -m unittest discover -s tests -v
-uv run quarto render exploracao.qmd
-uv run quarto render tidy.qmd
-uv run quarto render estrela.qmd
-uv run quarto render analise.qmd
+# Requer a trusted de população para documentar também a extensão
+uv run python -m src.audit_stage2 --reproduzir-coleta
+uv run quarto render relatorios/relatorio-etapa-2.qmd
 ```
 
-| Artefato | Finalidade |
-|---|---|
-| `src/prepare.py` | Validação do grão, exploração 2003–2020, coorte constante, pivot/melt reversível e flat table temporal |
-| `exploracao.qmd` | Cobertura, evolução, distribuições, massa no zero, idade ignorada e suspeita de São Luís em 2003 |
-| `tidy.qmd` | Justificativa do formato, demonstração de melt e definição de X/y |
-| `estrela.qmd` | Processo, granularidade, dimensões, medidas e verificações da carga |
-| `src/model.py` | Dimensões, fato por município-ano-faixa e agregada por município-ano; valida chaves e reconcilia antes da gravação |
-| `src/analyze.py` | Variações pareadas 2003–2024, rankings absolutos e sensibilidade a São Luís |
-| `analise.qmd` | Avaliação descritiva dos resultados; explicita por que não há inferência confirmatória |
-| `tests/` | Testes sem rede de preparação, carga dimensional, fail-stop e análise pareada |
+O gerador audit usa a CLI real do modelo com ano 2024 removido só em memória,
+compara hashes antes/depois e reconstrói após apagar gold temporária. Também
+executa a sequência oficial com nova coleta em cópia limpa. Não muda os JSON
+da coleta de referência. O PDF usa Typst fornecido pelo Quarto; não exige LaTeX.
 
-O comando de preparação grava nove Parquets em `data/analysis/` (fora do Git):
-série anual, perfil de faixas, idade ignorada, totais exploratórios, tabela larga,
-tabela longa, flat table, `X` e `y`. Todos são recalculáveis, e os arquivos são
-relidos e comparados depois da gravação.
+## Estrutura e interpretação
 
-A camada gold guarda seis Parquets (quatro dimensões e duas fatos), também fora
-do Git. As chaves substitutas são reproduzíveis na reconstrução integral. A
-fato detalhada soma 47.110 linhas e a agregada, 4.711 pares município-ano. O
-modelo compara cada combinação município-ano-faixa com a trusted, além de
-reconciliar linhas, registros, idade ignorada e células originalmente escritas
-com traço. A dimensão anual cobre 2003–2024, mesmo quando não há fato para certo
-ano ou município.
+raw é imutável por coleta; trusted é validada; quarentena preserva reprovados;
+gold contém tabelas dimensionais; data/analysis contém auxiliares recalculáveis.
+QMD em analises/, PDF/evidências em relatorios/. Dados, HTML, .env, .venv e
+material privado em /docs ficam fora do Git. Um documento de docs antes rastreado
+foi retirado do índice nesta branch, mantendo cópia local; commits passados não
+foram reescritos. [analises/analise.qmd](analises/analise.qmd) conserva o ranking
+descritivo antigo, com sensibilidade a São Luís/2003, não confirmação independente.
 
-Na flat table, cada linha é um município completo em 2018–2021. `X` tem cinco
-atributos calculados somente em 2018–2020; `y` indica se os registros de 2021
-ficaram abaixo da média anual desse período. Nome, código e contagem futura
-ficam fora de `X`. A ordem das linhas é compartilhada; a flat table preserva
-identificação e contagem do alvo para auditoria. Não há treinamento.
-
-`src/analyze.py` compara os registros de 2003 e 2024 somente para os 203
-municípios com ambas as pontas aprovadas. A saída é pareada por município e
-faixa; não representa o total oficial estadual. A maior redução agregada ocorre
-em 25–29 anos, mas a sensibilidade retira São Luís, cuja distribuição em 2003
-foi sinalizada no relatório da primeira fase. A ordem das faixas não muda, mas
-o tamanho do recuo se reduz.
-
-Essa comparação é **descritiva, não confirmatória**: os dados já haviam sido
-examinados, a quarentena usa a série inteira, não há mínimo de relevância
-prática definido com o gestor e não existe holdout independente. Não são
-calculados valor-p ou intervalos como se fossem confirmação nova. A próxima
-etapa depende de hipótese prospectiva, dados novos e limiar de decisão acordado.
-
-### Cuidados de interpretação
-
-- Lacunas de quarentena **não são zeros**. A cobertura anual varia; por isso a
-	exploração também acompanha os mesmos municípios em todos os anos.
-- `total_municipio_ano` repete-se dez vezes na trusted: somá-lo sobre as faixas
-	multiplica o total por dez. As análises somam `nascidos`.
-- As somas municipais aprovadas não equivalem ao total oficial do estado.
-- Os anos 2022–2024 ficam fora da nova exploração, mas não são holdout intocado:
-	o diagnóstico anterior já os examinou e a quarentena usa toda a série. Não
-	alegar confirmação independente nem ausência de vazamento global.
-- O relatório anterior apontou a concentração de São Luís/2003 em 25–29 anos
-	como suspeita ainda não resolvida. Ela é reavaliada, sem correção automática.
-- Registros tardios, idade ignorada, pandemia e seleção pela quarentena
-	permanecem limitações; nenhuma variação é interpretada como efeito causal.
-
-Os materiais de aula em `/docs/`, o roteiro privado e os HTML renderizados
-ficam fora do versionamento; a documentação autoral `docs/populacao.md` é a
-exceção pública. Os QMD, código e testes são os artefatos públicos
-reproduzíveis. Esta etapa foi preparada com auxílio do GitHub Copilot para
-leitura dos materiais, implementação e validação; decisões analíticas ainda
-dependem de revisão da equipe.
+Uso de IA: GitHub Copilot auxiliou revisão, implementação e relatório; a equipe
+é responsável por validar interpretação, evidências e submissão acadêmica.

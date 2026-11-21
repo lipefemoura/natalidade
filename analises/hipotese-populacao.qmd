@@ -24,8 +24,11 @@ O exercício abaixo avalia separadamente um indicador substituto, **registros po
 mil habitantes**, sem confirmação inferencial ou interpretação causal.
 
 Os dados e a quarentena de registros já haviam sido examinados. A nova hipótese
-não transforma 2024 em holdout independente. Não há valor-p, decisão de rejeitar
-hipótese nula, limiar de relevância prática acordado nem algoritmo treinado.
+não transforma 2024 em holdout independente. A pedido da equipe, foram adicionados
+**valores-p bilaterais nominais, pós-exploratórios**, e intervalos nominais de
+Pearson. Eles permitem explicar a decisão de um teste convencional, mas não
+transformam a análise em confirmação independente. Não há limiar de relevância
+prática acordado nem algoritmo treinado.
 
 ```{python}
 import matplotlib.pyplot as plt
@@ -114,7 +117,7 @@ ordenação). O tamanho da amostra é informado para cada medida; associação
 com dados constantes ou menos de três pares é indefinida, nunca zero.
 
 ```{python}
-display(saidas["correlacoes"].round(4))
+display(saidas["correlacoes"][["cenario", "desfecho", "n", "pearson", "spearman"]].round(4))
 fig, ax = plt.subplots()
 ax.scatter(pares.crescimento_pop_pct.astype(float),
            pares.queda_indicador_por_mil.astype(float),
@@ -127,6 +130,68 @@ ax.set(xlabel="Crescimento populacional 2003–2024 (%)",
 plt.tight_layout()
 plt.show()
 ```
+
+## Valores-p: o que se rejeita e sob quais condições
+
+Para Pearson, o teste bilateral compara $H_0:\rho=0$ com $H_1:\rho\ne0$;
+para Spearman, a hipótese nula é ausência de associação de ranks, com valor-p
+assintótico. A regra convencional usa $\alpha=0{,}05$:
+
+- **$p<0{,}05$:** rejeitar $H_0$ naquele teste, sob suas suposições.
+- **$p\ge0{,}05$:** não rejeitar $H_0$; não significa provar ausência de associação.
+- A hipótese substantiva de crescimento acompanhado de queda prevê associação
+  **positiva**, pois queda foi definida como inicial menos final. Rejeição
+  bilateral com coeficiente negativo não apoiaria essa direção.
+
+O teste foi mantido bilateral porque os resultados já tinham sido vistos;
+não se escolhe unilateral depois para reduzir o valor-p. O valor-p não é a
+probabilidade de $H_0$ ser verdadeira nem a probabilidade de o resultado ser
+"acaso". Ele quantifica resultados tão ou mais extremos sob a hipótese nula
+e o modelo adotado.
+
+```{python}
+testes = saidas["correlacoes"]
+principal_por_cenario = testes.loc[testes.desfecho.eq("queda_indicador_por_mil"),
+  ["cenario", "n", "pearson", "pearson_p_bilateral", "pearson_p_holm",
+   "spearman", "spearman_p_bilateral", "spearman_p_holm"]]
+display(principal_por_cenario.style.format({
+  "pearson": "{:.4f}", "spearman": "{:.4f}",
+  "pearson_p_bilateral": "{:.6g}", "pearson_p_holm": "{:.6g}",
+  "spearman_p_bilateral": "{:.6g}", "spearman_p_holm": "{:.6g}"}))
+display(testes.loc[testes.desfecho.eq("queda_indicador_por_mil"),
+  ["cenario", "pearson_ic95_inferior", "pearson_ic95_superior"]].round(4))
+```
+
+**2003–2024:** Pearson $r=0{,}2886$, $p=0{,}00002973$; IC95% nominal
+$[0{,}1571;\,0{,}4100]$. Spearman $r_s=0{,}1678$, $p=0{,}01669$.
+Os dois rejeitam a respectiva hipótese nula no teste nominal a 5%.
+**2011–2021:** Pearson $p=0{,}8518$ e Spearman $p=0{,}2825$; não se rejeitam
+as hipóteses nulas. A associação não é estável entre as janelas examinadas.
+
+Como há vários testes, também se apresenta **Holm** na família conjunta de
+**24 testes de pontas** (4 cenários × 3 desfechos × 2 métodos). O ajuste controla
+o erro familiar se cada valor-p for válido; não corrige seleção anterior ou
+dependência espacial entre municípios dentro de um teste. Os controles
+aritméticos também foram incluídos, de forma conservadora. Em 2003–2024,
+Pearson permanece abaixo de 5% ($p_{Holm}=0{,}0003271$), mas Spearman não
+($p_{Holm}=0{,}09558$). Não se escolhe o método apenas pelo menor p.
+Os IC95% apresentados são individuais e **não ajustados por multiplicidade**.
+
+### Por que isso ainda não confirma natalidade
+
+Os valores nominais pressupõem pares municipais independentes; o teste usual
+de Pearson usa o modelo nulo de normalidade bivariada. Spearman usa aproximação
+assintótica (não é teste exato de permutação, especialmente relevante em amostras
+menores e com empates). Não foram validadas independência espacial ou adequação
+distributiva, portanto os valores-p são **referências condicionais, não garantias**.
+
+Além disso, os municípios cobrem quase todo o estado, não uma amostra aleatória
+simples. Para descrever esse conjunto finito, o coeficiente observado já é
+informativo; inferir para um processo gerador ou outros períodos exige um modelo
+explícito. A seleção pela quarentena, o caráter pós-exploratório e a escolha de
+janelas permanecem limitações mesmo após Holm. O teste de correlação zero não
+elimina o acoplamento do denominador e não testa diretamente um mecanismo
+demográfico nem causalidade.
 
 ## Sensibilidade e associação mecânica
 
@@ -158,8 +223,15 @@ os mesmos municípios nem interpretar mudanças como testes independentes.
 
 ```{python}
 anual = saidas["correlacoes_anuais"]
-display(anual.loc[anual.desfecho.eq("queda_indicador_por_mil")].round(4))
+display(anual.loc[anual.desfecho.eq("queda_indicador_por_mil")].style.format({
+  "pearson": "{:.4f}", "spearman": "{:.4f}",
+  "pearson_p_bilateral": "{:.6g}", "spearman_p_bilateral": "{:.6g}",
+  "pearson_p_holm": "{:.6g}", "spearman_p_holm": "{:.6g}"}))
 ```
+
+Os testes anuais recebem ajuste Holm em **família separada**, contendo todos
+os intervalos, desfechos e métodos dessa tabela. Não se alega controle familiar
+global conjunto com a tabela de pontas nem com análises anteriores do projeto.
 
 ## Síntese e limite de decisão
 
@@ -168,7 +240,8 @@ principal = saidas["correlacoes"].query(
     "cenario == '2003_2024_todos_pareados' and desfecho == 'queda_indicador_por_mil'"
 ).iloc[0]
 print(f"Indicador substituto, n={principal['n']}: "
-      f"Pearson={principal.pearson:.3f}; Spearman={principal.spearman:.3f}.")
+  f"Pearson={principal.pearson:.3f}, p={principal.pearson_p_bilateral:.6g}; "
+  f"Spearman={principal.spearman:.3f}, p={principal.spearman_p_bilateral:.6g}.")
 ```
 
 Esses coeficientes descrevem a amostra observada; **não confirmam nem refutam a
@@ -190,3 +263,20 @@ materna**, definir crescimento (população total versus urbanização), escolhe
 janela territorialmente comparável e acordar relevância prática. Uma análise
 confirmatória exigirá planejamento independente e tratamento da dependência
 temporal/espacial; adicionar denominador não resolve essas limitações.
+
+### Plano para avaliar a hipótese substantiva
+
+1. Definir antes da próxima análise a medida de crescimento, o numerador
+  demográfico, janela principal, direção e menor efeito considerado relevante.
+2. Usar nascimentos por ocorrência/residência e população de referência
+  compatível; auditar registro tardio, limites territoriais e revisões.
+3. Considerar um modelo de contagens com exposição populacional (`offset`),
+  efeitos municipais e temporais, e covariáveis como estrutura etária e migração.
+  Isso evita usar apenas duas razões com denominador compartilhado, mas não
+  dispensa diagnóstico de especificação nem garante ausência de viés.
+4. Tratar dependência espacial/temporal na incerteza, avaliar sensibilidades
+  previamente definidas e replicar em período/dados não usados nas decisões.
+5. Relatar tamanho do efeito e intervalo, não somente p. Efeito na direção
+  esperada, relevante e estável dá **apoio** à hipótese, não prova definitiva.
+  Resultado não significativo é inconclusivo sobre ausência; para sustentar
+  ausência de efeito relevante, definir uma margem e usar teste de equivalência.

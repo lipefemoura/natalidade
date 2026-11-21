@@ -1,0 +1,202 @@
+---
+title: "Exploração dos registros de nascidos vivos"
+subtitle: "Atividade 02 · fonte original · período exploratório 2003–2020"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+execute:
+  warning: false
+  out-width: "100%"
+---
+
+## 1. Preparação: parte separada e limite de independência
+
+Uma observação é a contagem de **registros em cartório** por município, ano e
+faixa de idade materna. O ano é de registro, não necessariamente de nascimento.
+Fonte principal: trusted da Etapa 1, SIDRA 2609, municípios do Maranhão.
+
+Corte temporal: **2003–2020 para exploração; 2021–2024 fora das views abaixo**.
+O corte preserva os anos mais recentes para comparação futura e evita mistura
+aleatória de anos. **A reserva não está intocada:** diagnóstico da Etapa 1,
+flat com alvo 2021, análises de pontas e quarentena global já usaram esses anos.
+Não é possível desfazer essa exposição. As previsões organizadas nesta revisão
+são pós-exploratórias, não hipóteses originalmente pré-registradas. Este documento
+não consulta nem confirma previsões na parte separada. Para cumprir literalmente
+uma confirmação independente na Etapa 3, será necessário um novo período/dado
+e revisão da equipe/professor. Essa limitação é declarada, não ocultada.
+
+## 2. Perguntas, colunas e expectativas (antes das consultas deste documento)
+
+| Pergunta | Colunas envolvidas | Expectativa e explicação alternativa |
+|---|---|---|
+| P1. Os registros diminuem mesmo mantendo os mesmos municípios? | ano, cod_municipio, nascidos | Recuo ao longo do tempo; queda do registro tardio pode explicar parte dele |
+| P2. O perfil materno difere entre o início e o fim exploratório? | ano, faixa_idade_mae, nascidos, cod_municipio | Participação de 30 anos ou mais cresce; não equivale a taxa de fecundidade |
+| P3. Idade ignorada distorce a comparação das faixas? | ano, faixa_idade_mae, nascidos, cod_municipio | Participação pequena mas variável; não redistribuir automaticamente |
+
+```{python}
+# | label: preparacao-views
+import duckdb
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import display
+from src.prepare import RAIZ, TRUSTED, FAIXAS, validar_base, explorar
+
+con = duckdb.connect()
+con.execute(f"CREATE VIEW trusted AS SELECT * FROM read_parquet('{TRUSTED.as_posix()}')")
+con.execute("CREATE VIEW base AS SELECT * FROM trusted WHERE ano BETWEEN 2003 AND 2020")
+con.execute("""CREATE VIEW totais AS
+    SELECT cod_municipio, municipio, ano, SUM(nascidos)::BIGINT AS registros
+    FROM base GROUP BY cod_municipio, municipio, ano""")
+con.execute("""CREATE VIEW coorte AS
+    SELECT cod_municipio FROM totais GROUP BY cod_municipio HAVING COUNT(DISTINCT ano)=18""")
+con.execute("CREATE VIEW balanceada AS SELECT * FROM totais WHERE cod_municipio IN (SELECT * FROM coorte)")
+base = validar_base(con.sql("SELECT * FROM base").df())
+resultados = explorar(base)
+serie = resultados["serie_anual"]
+totais = con.sql("SELECT * FROM totais ORDER BY cod_municipio, ano").df()
+plt.rcParams.update({"figure.figsize": (9, 4), "axes.spines.top": False,
+                     "axes.spines.right": False, "font.size": 10})
+assert base.ano.between(2003, 2020).all()
+print("Todas as consultas exploratórias usam base/totais/balanceada, sem reserva.")
+```
+
+## 3. Varredura: cada coluna sozinha
+
+```{python}
+# | label: univariadas
+display(pd.DataFrame({"tipo": base.dtypes.astype(str), "distintos": base.nunique(),
+                      "nulos_pct": base.isna().mean()*100}))
+display(base[["ano", "nascidos", "total_municipio_ano"]].describe())
+display(base.faixa_idade_mae.value_counts().reindex(FAIXAS).to_frame("células"))
+display(base.valor_era_traco.value_counts().to_frame("células"))
+display(base.municipio.drop_duplicates().head(10).to_frame("exemplos de nomes"))
+fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
+axes[0].hist(totais.registros, bins=30, color="#087f8c")
+axes[0].set(xlabel="Registros por município-ano", ylabel="Frequência")
+axes[1].boxplot(totais.registros)
+axes[1].set(ylabel="Registros por município-ano", xticks=[])
+plt.tight_layout()
+plt.show()
+```
+
+Código e nome são identificadores, não medidas. O total municipal repete-se nas
+dez faixas e **não pode ser somado sobre elas**. Zeros de faixas são valores
+publicados, não lacunas. Extremos de porte não são eliminados pelo boxplot.
+
+## 4. P1: duas colunas, terceira coluna e tabela cruzada
+
+```{python}
+# | label: pergunta-1
+# Duas: ano × registros; terceira: conjunto municipal constante/variável.
+display(serie)
+fig, ax = plt.subplots()
+ax.plot(serie.ano, serie.registros_aprovados, label="Aprovados no ano", color="#087f8c")
+ax.plot(serie.ano, serie.registros_coorte, label="Coorte constante", color="#c35b27")
+ax.set(xlabel="Ano do registro", ylabel="Registros", title="P1: cobertura variável versus constante")
+ax.set_xticks(range(2003, 2021, 2))
+ax.legend()
+plt.tight_layout()
+plt.show()
+# Tabela cruzada: porte municipal inicial (2003) × fase temporal.
+porte = totais.loc[totais.ano.eq(2003), ["cod_municipio", "registros"]].copy()
+porte["porte_2003"] = pd.cut(porte.registros, [-1, 300, 1000, float("inf")],
+                             labels=["até 300", "301–1000", "mais de 1000"])
+recorte = totais.merge(porte[["cod_municipio", "porte_2003"]], on="cod_municipio", validate="many_to_one")
+recorte["fase"] = recorte.ano.map(lambda ano: "2003–2011" if ano <= 2011 else "2012–2020")
+display(pd.crosstab(recorte.porte_2003, recorte.fase, values=recorte.registros, aggfunc="sum"))
+for medida in ("registros_aprovados", "registros_coorte"):
+    print(medida, "variação 2003–2020 (%):", round(100*(serie[medida].iloc[-1]/serie[medida].iloc[0]-1), 2))
+```
+
+A coorte de 193 municípios é definida somente em 2003–2020. Não resolve viés da
+quarentena, mas distingue queda de registros de parte da mudança de composição.
+A soma aprovada não representa o total oficial estadual.
+
+## 5. P2: duas colunas, terceira coluna e tabela cruzada
+
+```{python}
+# | label: pergunta-2
+display(resultados["perfil_faixas"].round(2))
+# Duas: faixa × registros. Terceira: fase temporal, sempre na base exploratória.
+com_fase = base.assign(fase=base.ano.map(lambda ano: "2003–2011" if ano <= 2011 else "2012–2020"))
+cruzada = pd.crosstab(com_fase.faixa_idade_mae, com_fase.fase,
+                      values=com_fase.nascidos, aggfunc="sum").reindex(FAIXAS)
+display(cruzada)
+participacoes = 100*cruzada/cruzada.sum(axis=0)
+display(participacoes.round(2))
+participacoes.plot.barh(figsize=(9, 5), color=["#087f8c", "#c35b27"])
+plt.xlabel("Participação dos registros da fase (%)")
+plt.tight_layout()
+plt.show()
+```
+
+Faixas mutuamente exclusivas são mantidas; idades simples e Total da raw não
+entram de novo na soma. A fonte não possui mulheres por faixa para calcular
+taxa específica. Participações são razões de somas, não médias de percentuais.
+
+## 6. P3: duas colunas, terceira coluna e tabela cruzada
+
+```{python}
+# | label: pergunta-3
+display(resultados["idade_ignorada"].round(3))
+# Duas: ano × participação ignorada; terceira: porte de 2003.
+idade_porte = com_fase.merge(porte[["cod_municipio", "porte_2003"]], on="cod_municipio", validate="many_to_one")
+idade_porte["ignorada"] = idade_porte.faixa_idade_mae.eq("Ignorada")
+tab_idade = pd.crosstab(idade_porte.porte_2003, idade_porte.ignorada,
+                        values=idade_porte.nascidos, aggfunc="sum").fillna(0)
+display(tab_idade.rename(columns={False: "idade conhecida", True: "ignorada"}))
+display((100*tab_idade.div(tab_idade.sum(axis=1), axis=0)).round(3))
+sao_luis = base.loc[base.cod_municipio.eq("2111300") & base.ano.eq(2003)]
+print("São Luís/2003, participação 25–29 (%):", round(
+    100*sao_luis.loc[sao_luis.faixa_idade_mae.eq("25 a 29 anos"), "nascidos"].sum()/sao_luis.nascidos.sum(), 2))
+```
+
+A suspeita herdada de São Luís/2003 (57,02% em 25–29) é mantida sem correção
+arbitrária. A regra de quarentena sobre total municipal não diagnostica todas
+as distribuições etárias. Sensibilidade não equivale a provar erro.
+
+## 7. Quarentena relida
+
+```{python}
+# | label: quarentena-exploratoria
+quarentena = pd.read_parquet(RAIZ / "data/quarentena/rejeitados.parquet")
+quarentena = quarentena.loc[quarentena.ano.between(2003, 2020)]
+display(quarentena.groupby("motivo", as_index=False).agg(
+    celulas=("cod_municipio", "size"), municipios=("cod_municipio", "nunique")))
+display(quarentena[["cod_municipio", "municipio", "ano", "motivo"]].drop_duplicates().head(10))
+```
+
+Reprovação leva o município-ano inteiro para não produzir soma parcial de faixas.
+Não se trocam observações reprovadas por zero. A regra herdada compara participação
+com mediana da série inteira: **vazamento global declarado**, não eliminado por
+estas views. Nenhuma nova exclusão foi escolhida para favorecer as perguntas.
+
+## 8. Hipóteses a confirmar depois (não conferidas aqui)
+
+Estas previsões são operacionalizáveis, mas redigidas após exploração prévia.
+Não se atribui a elas o estatuto de previsões prospectivas originais.
+
+| Pergunta | Previsão verificável na parte separada | Regra de comparação futura |
+|---|---|---|
+| P1 | Média anual de registros em 2021–2024 menor que em 2003–2020 | Mesmos municípios completos em ambos os períodos; queda positiva |
+| P2 | Participação de 30+ em 2021–2024 maior que em 2003–2020 | Soma das cinco faixas 30+ / soma das dez faixas, mesma coorte |
+| P3 | Participação de Ignorada abaixo de 2% em 2021–2024 | Razão das somas na mesma coorte; limiar descritivo pós-exploratório |
+
+Não se testa a tabela nesta atividade. Uma conferência posterior da reserva já
+exposta será sensibilidade, não confirmação independente. Os valores-p antigos
+estão em documento separado de extensão, não nesta exploração exigida.
+
+## 9. Perguntas para depois
+
+- A associação permanece usando nascimentos ocorridos no ano por residência materna?
+- O registro tardio explica diferenças municipais ou desloca registros entre anos?
+- Quanto migração e estrutura etária explicam crescimento e perfil materno?
+- A concentração de São Luís em 2003 se repete no dado original com outro filtro?
+- Como revisar a quarentena sem utilizar o futuro na definição dos limites?
+
+```{python}
+con.close()
+```
