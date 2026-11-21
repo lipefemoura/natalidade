@@ -13,8 +13,11 @@ Rocha (20231SI0032), Felipe Moura de Oliveira (20231SI0027).
 - [Relatório em PDF](relatorios/relatorio-etapa-2.pdf): cinco partes do enunciado,
   motivos das decisões, dificuldades, desenho e duas saídas reais do modelo.
 - [Fonte do relatório](relatorios/relatorio-etapa-2.qmd).
-- [Revisão dos requisitos e funções das aulas](relatorios/revisao-etapa-2.md).
-- [Evidências de execução e SHA-256](relatorios/evidencias-etapa-2.json).
+
+O relatório incorpora as saídas reais de execução normal, fail-stop e reprodução
+limpa de 21/11/2026. A fonte QMD é autossuficiente: não precisa de JSON auxiliar,
+dados locais ou script Python para gerar o PDF. Esses registros documentam aquela
+validação; gerar o PDF novamente não executa nem atualiza o pipeline.
 
 **Status:** núcleo técnico revisado, 49 testes aprovados, sequência oficial
 verificada em cópia limpa com nova coleta. **Não se garante cumprimento literal
@@ -163,24 +166,21 @@ correlação nula não prova mecanismo causal. A aula 10 ensina comparação por
 bootstrap/permutação; esses laços de grupos não foram alegados como implementados.
 Os testes SciPy são complemento explicitamente nominal, não requisito da atividade 02.
 
-## Gerar PDF e evidências da entrega
+## Gerar o PDF da entrega
 
 ```bash
-# Requer a trusted de população para documentar também a extensão
-uv run python -m src.audit_stage2 --reproduzir-coleta
 uv run quarto render relatorios/relatorio-etapa-2.qmd
 ```
 
-O gerador audit usa a CLI real do modelo com ano 2024 removido só em memória,
-compara hashes antes/depois e reconstrói após apagar gold temporária. Também
-executa a sequência oficial com nova coleta em cópia limpa. Não muda os JSON
-da coleta de referência. O PDF usa Typst fornecido pelo Quarto; não exige LaTeX.
+O PDF usa Typst fornecido pelo Quarto; não exige LaTeX, script de conversão ou
+coleta nova. Para repetir a validação técnica, use a sequência oficial e os
+testes acima; a opção `--remover-ano-dimensao` mantém o teste fail-stop disponível.
 
 ## Estrutura e interpretação
 
 raw é imutável por coleta; trusted é validada; quarentena preserva reprovados;
 gold contém tabelas dimensionais; data/analysis contém auxiliares recalculáveis.
-QMD em analises/, PDF/evidências em relatorios/. Dados, HTML, .env, .venv e
+QMD em analises/, fonte/PDF do relatório em relatorios/. Dados, HTML, .env, .venv e
 material privado em /docs ficam fora do Git. Um documento de docs antes rastreado
 foi retirado do índice nesta branch, mantendo cópia local; commits passados não
 foram reescritos. [analises/analise.qmd](analises/analise.qmd) conserva o ranking

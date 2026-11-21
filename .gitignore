@@ -17,25 +17,15 @@ data/trusted/*
 !data/trusted/.gitkeep
 data/quarentena/
 
-# Saídas do Quarto
-.quarto/
-diagnostico.html
-diagnostico_files/
-/exploracao.html
-/exploracao_files/
-/tidy.html
-/tidy_files/
-/estrela.html
-/estrela_files/
-/analise.html
-/analise_files/
-/diagnostico-populacao.html
-/diagnostico-populacao_files/
-/hipotese-populacao.html
-/hipotese-populacao_files/
+# Saídas e arquivos intermediários do Quarto (PDF final fica versionado)
+/.quarto/
+/*.html
+/*_files/
 /analises/*.html
 /analises/*_files/
-/analises/*.quarto_ipynb
+**/*.quarto_ipynb
+/relatorios/*.typ
+/relatorios/*_files/
 /data/analysis/
 /data/gold/
 
@@ -47,5 +37,4 @@ dist/
 wheels/
 *.egg-info
 
-/.quarto/
-**/*.quarto_ipynb
+

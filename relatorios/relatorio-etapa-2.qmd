@@ -21,15 +21,6 @@ execute:
   warning: false
 ---
 
-```{python}
-import json
-import pandas as pd
-from IPython.display import display, Markdown
-from src.population import RAIZ
-
-evidencia = json.loads((RAIZ / "relatorios/evidencias-etapa-2.json").read_text())
-```
-
 Repositório: https://github.com/lipefemoura/natalidade · Branch de entrega: **etapa-2**.
 Professor: Dr. Josenildo Silva. Revisão baseada no enunciado da atividade 02 e nas aulas 02–05 e 07–10.
 
@@ -172,12 +163,28 @@ aos sete Parquets atuais. Gold é produzida somente por `src/model.py`.
 
 **Execução normal:** `uv run python src/model.py --com-populacao`.
 Saída registrada pelo mesmo `construir()`; caminhos absolutos foram omitidos
-apenas para caber. A evidência integral e os hashes estão em
-`relatorios/evidencias-etapa-2.json`.
+apenas para caber. As saídas abaixo são registros da validação realizada em
+21/11/2026, incorporados a este relatório; não são recalculados ao gerar o PDF.
 
-```{python}
-normal = "\n".join(linha.split(" -> ")[0] for linha in evidencia["normal"].splitlines())
-display(Markdown("```text\n" + normal + "\n```"))
+```text
+dim_municipio                         217 linhas
+dim_ano                                22 linhas
+dim_faixa_idade                         10 linhas
+dim_origem_valor                         2 linhas
+fato_registros                      47110 linhas
+fato_registros_municipio_ano          4711 linhas
+fato_populacao                        3906 linhas
+
+Reconciliação trusted × gold:
+           medida   trusted      gold
+  linhas_fato_central     47110     47110
+      nascidos_total   2773381   2773381
+  pares_municipio_ano      4711      4711
+    nascidos_agregada   2773381   2773381
+      idade_ignorada     36348     36348
+    celulas_era_traco      8439      8439
+    linhas_populacao      3906      3906
+soma_celulas_populacao 120108521 120108521
 ```
 
 `soma_celulas_populacao` confere transporte das células; **não representa
@@ -192,8 +199,9 @@ retorna central e resumo, delegando este último à função `agregada()`.
 A opção injeta a falha só em memória; a execução seguinte sem a opção não tem
 a alteração. A verificação usa a CLI real, não uma mensagem fabricada.
 
-```{python}
-display(Markdown("```text\n" + evidencia["falha_dimensao"] + "\n```"))
+```text
+FAIL-STOP: 1 chaves sem dimensão para ano: [2024]
+Nada foi gravado em data/gold/.
 ```
 
 Código de saída **1**; os hashes da gold antes e depois permaneceram iguais.
@@ -209,9 +217,13 @@ sem raw, trusted ou gold prévias, executou a sequência oficial com nova coleta
 online; o projeto de referência conservou a raw de 16/11. Não foi uma afirmação
 de clone remoto/acesso do professor: isso depende da equipe.
 
-```{python}
-for passo in evidencia.get("reproducao_limpa", []):
-    print(f"[saída {passo['codigo_saida']}] {passo['comando']}")
+```text
+[saída 0] uv sync
+[saída 0] uv run python src/ingest.py
+[saída 0] uv run quarto render analises/diagnostico.qmd
+[saída 0] uv run python src/transform.py
+[saída 0] uv run quarto render analises/exploracao.qmd
+[saída 0] uv run python src/model.py
 ```
 
 O `uv.lock` fixa dependências; `.env.example` informa que não há chave;
