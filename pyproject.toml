@@ -1,7 +1,7 @@
 [project]
 name = "natalidade"
 version = "0.1.0"
-description = "Preparação e análise dos registros de nascidos vivos no Maranhão (IBGE/SIDRA)"
+description = "Registros de nascidos vivos e população dos municípios do Maranhão (IBGE)"
 readme = "README.md"
 authors = [
     { name = "Felipe Moura", email = "olive.felipe2014@gmail.com" }
@@ -14,7 +14,6 @@ dependencies = [
     "pyarrow>=25.0.1",
     "python-dotenv>=1.2.3",
     "requests>=2.34.2",
-    "scipy>=1.18.1",
 ]
 
 [dependency-groups]
