@@ -3,7 +3,8 @@
 
 # Material de referência e planejamento local
 /docs/
-/roteiro-atividade-2.md
+/*.md
+!/README.md
 
 # Ambiente virtual
 .venv/
@@ -26,7 +27,6 @@ data/quarentena/
 **/*.quarto_ipynb
 /relatorios/*.typ
 /relatorios/*_files/
-/data/analysis/
 /data/gold/
 
 # Python-generated files
