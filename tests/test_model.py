@@ -1,119 +1,101 @@
-"""Testes locais do modelo estrela, sem rede e sem tocar data/gold/ real."""
+"""Modelo estrela com dados pequenos, sem rede e sem tocar no data/gold/ do projeto."""
 
 import tempfile
 import unittest
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
-from src.model import ANOS, CHAVES, CONFERENCIA, TABELAS_GOLD, ModeloInvalido, agregada, construir, dimensoes, fatos, reconciliar
-from src.transform import FAIXAS
+from src.model import TABELAS_GOLD, ModeloInvalido, conferir_celulas, construir, dimensoes, fatos, validar_base
+from src.transform import ANOS_POPULACAO, FAIXAS
+
+MUNICIPIOS = (("2100055", "Açailândia", 1), ("2100105", "Afonso Cunha", 2))
 
 
-def exemplo_modelo() -> pd.DataFrame:
+def registros() -> pd.DataFrame:
     linhas = []
-    for codigo, nome, fator in [("2100055", "Açailândia", 1), ("2100105", "Afonso Cunha", 2)]:
-        for ano in ANOS:
-            for faixa in FAIXAS:
-                traco = ano == 2024 and faixa == "Ignorada" and fator == 1
-                linhas.append({
-                    "cod_municipio": codigo,
-                    "municipio": nome,
-                    "ano": ano,
-                    "faixa_idade_mae": faixa,
-                    "nascidos": 0 if traco else fator * ano % 17,
-                    "valor_era_traco": traco,
-                    "total_municipio_ano": sum(
-                        0 if (ano == 2024 and f == "Ignorada" and fator == 1)
-                        else fator * ano % 17 for f in FAIXAS
-                    ),
-                })
+    for codigo, nome, fator in MUNICIPIOS:
+        for ano in range(2003, 2025):
+            valores = [0 if faixa == "Ignorada" and ano == 2024 else fator * (ano % 7 + 1) for faixa in FAIXAS]
+            linhas += [
+                {"cod_municipio": codigo, "municipio": nome, "ano": ano, "faixa_idade_mae": faixa,
+                 "nascidos": valor, "valor_era_traco": valor == 0, "total_municipio_ano": sum(valores)}
+                for faixa, valor in zip(FAIXAS, valores)
+            ]
     return pd.DataFrame(linhas)
+
+
+def populacao() -> pd.DataFrame:
+    return pd.DataFrame([
+        {"cod_municipio": codigo, "municipio": nome, "ano": ano, "populacao": 10_000 * fator + ano}
+        for codigo, nome, fator in MUNICIPIOS for ano in ANOS_POPULACAO
+    ])
 
 
 class ModeloTest(unittest.TestCase):
     def setUp(self):
-        self.base = exemplo_modelo()
+        self.pasta = tempfile.TemporaryDirectory()
+        raiz = Path(self.pasta.name)
+        self.origem, self.origem_populacao = raiz / "nascimentos.parquet", raiz / "populacao.parquet"
+        self.destino = raiz / "gold"
+        registros().to_parquet(self.origem, index=False)
+        populacao().to_parquet(self.origem_populacao, index=False)
 
-    def test_dimensoes_completas_e_chaves_deterministicas(self):
-        dims = dimensoes(self.base)
-        self.assertEqual(dims["dim_ano"].ano.tolist(), list(ANOS))
-        self.assertEqual(dims["dim_faixa_idade"].faixa_idade_mae.tolist(), FAIXAS)
-        self.assertEqual(set(dims["dim_origem_valor"].valor_era_traco), {False, True})
-        pd.testing.assert_frame_equal(dims["dim_municipio"], dimensoes(self.base)["dim_municipio"])
-        self.assertEqual(dims["dim_ano"].ano_sk.tolist(), list(ANOS))
-        self.assertIn("decada", dims["dim_ano"])
+    def tearDown(self):
+        self.pasta.cleanup()
 
-    def test_listas_da_aula_e_funcao_agregada(self):
-        self.assertEqual(len(CHAVES), 4)
-        self.assertEqual(len(CONFERENCIA), 6)
-        self.assertEqual(len(TABELAS_GOLD), 6)
-        dims = dimensoes(self.base)
-        central, resumo = fatos(self.base, dims)
-        pd.testing.assert_frame_equal(resumo, agregada(central, dims))
+    def construir(self, **kwargs):
+        return construir(self.origem, self.origem_populacao, self.destino, **kwargs)
 
-    def test_injecao_linha_dimensao_faltando_preserva_gold(self):
-        with tempfile.TemporaryDirectory() as pasta:
-            origem = Path(pasta) / "trusted.parquet"
-            destino = Path(pasta) / "gold"
-            destino.mkdir()
-            marcador = destino / "anterior.txt"
-            marcador.write_text("intacto")
-            self.base.to_parquet(origem, index=False)
-            with self.assertRaisesRegex(ModeloInvalido, "sem dimensão para ano: \\[2024\\]"):
-                construir(origem, destino, remover_ano_dimensao=2024)
-            self.assertEqual(marcador.read_text(), "intacto")
+    def test_grava_as_sete_tabelas_do_desenho(self):
+        tabelas = self.construir()
+        self.assertEqual(sorted(p.stem for p in self.destino.glob("*.parquet")), sorted(TABELAS_GOLD))
+        self.assertEqual(len(tabelas["dim_ano"]), 22)
+        self.assertEqual(len(tabelas["fato_registros"]), len(registros()))
+        self.assertEqual(tabelas["fato_registros"]["nascidos"].sum(), registros()["nascidos"].sum())
+        self.assertEqual(len(tabelas["fato_populacao"]), len(populacao()))
+        self.assertEqual(len(tabelas["fato_registros_municipio_ano"]), 2 * 22)
 
-    def test_ausencia_de_ano_na_dimensao_e_fail_stop(self):
-        dims = dimensoes(self.base, ANOS[:-1])
-        with self.assertRaisesRegex(ModeloInvalido, "sem dimensão para ano"):
-            fatos(self.base, dims)
+    def test_mesma_trusted_da_os_mesmos_arquivos(self):
+        self.construir()
+        primeira = {p.name: p.read_bytes() for p in self.destino.glob("*.parquet")}
+        self.construir()
+        self.assertEqual(primeira, {p.name: p.read_bytes() for p in self.destino.glob("*.parquet")})
 
-    def test_fatos_preservam_graos_e_medidas(self):
-        dims = dimensoes(self.base)
-        central, agregada = fatos(self.base, dims)
-        self.assertEqual(len(central), len(self.base))
-        self.assertEqual(central.nascidos.sum(), self.base.nascidos.sum())
-        self.assertEqual(len(agregada), 2 * len(ANOS))
-        self.assertEqual(agregada.registros.sum(), self.base.nascidos.sum())
-        self.assertEqual(agregada.registros_idade_ignorada.sum(),
-                         self.base.loc[self.base.faixa_idade_mae.eq("Ignorada"), "nascidos"].sum())
-        self.assertEqual(agregada.celulas_era_traco.sum(), int(self.base.valor_era_traco.sum()))
+    def test_ano_faltando_na_dimensao_para_antes_de_gravar(self):
+        self.destino.mkdir()
+        (self.destino / "anterior.txt").write_text("intacto", encoding="utf-8")
+        with self.assertRaisesRegex(ModeloInvalido, r"\[2024\] não está em dim_ano"):
+            self.construir(remover_ano_dimensao=2024)
+        self.assertEqual([p.name for p in self.destino.iterdir()], ["anterior.txt"])
 
-    def test_reconciliacao_por_faixa_detecta_troca_com_total_global_igual(self):
-        dims = dimensoes(self.base)
-        central, agregada = fatos(self.base, dims)
-        central.loc[0, "nascidos"] += 1
-        central.loc[1, "nascidos"] -= 1
-        self.assertEqual(central.nascidos.sum(), self.base.nascidos.sum())
-        with self.assertRaisesRegex(ModeloInvalido, "município-ano-faixa"):
-            reconciliar(self.base, dims, central, agregada)
+    def test_calendario_curto_tambem_para(self):
+        with self.assertRaisesRegex(ModeloInvalido, "dim_ano"):
+            self.construir(anos=(2003, 2023))
+        self.assertFalse(self.destino.exists())
 
-    def test_falha_nao_altera_gold_existente(self):
-        with tempfile.TemporaryDirectory() as pasta:
-            origem = Path(pasta) / "trusted.parquet"
-            destino = Path(pasta) / "gold"
-            destino.mkdir()
-            marcador = destino / "anterior.txt"
-            marcador.write_text("gold anterior intacto", encoding="utf-8")
-            self.base.to_parquet(origem, index=False)
-            with self.assertRaisesRegex(ModeloInvalido, "ano ausente"):
-                construir(origem, destino, ANOS[:-1])
-            self.assertEqual(marcador.read_text(encoding="utf-8"), "gold anterior intacto")
-            self.assertEqual(list(destino.iterdir()), [marcador])
+    def test_municipio_ano_incompleto_e_recusado(self):
+        with self.assertRaisesRegex(ModeloInvalido, "dez faixas"):
+            base = registros()
+            # a faixa Ignorada de 2024 vale zero: sem ela a soma ainda bate, mas o par fica com nove faixas
+            sem_uma_faixa = ~((base["ano"] == 2024) & (base["faixa_idade_mae"] == "Ignorada")
+                              & (base["cod_municipio"] == "2100055"))
+            validar_base(base[sem_uma_faixa])
 
-    def test_gravacao_e_releitura_de_todas_as_tabelas(self):
-        with tempfile.TemporaryDirectory() as pasta:
-            origem = Path(pasta) / "trusted.parquet"
-            destino = Path(pasta) / "gold"
-            self.base.to_parquet(origem, index=False)
-            tabelas = construir(origem, destino)
-            esperados = {"dim_municipio", "dim_ano", "dim_faixa_idade", "dim_origem_valor",
-                         "fato_registros", "fato_registros_municipio_ano", "reconciliacao"}
-            self.assertEqual(set(tabelas), esperados)
-            self.assertEqual(len(list(destino.glob("*.parquet"))), len(esperados) - 1)
-            for nome in esperados - {"reconciliacao"}:
-                pd.testing.assert_frame_equal(tabelas[nome], pd.read_parquet(destino / f"{nome}.parquet"))
+    def test_conferencia_por_celula_pega_trocas_que_se_anulam(self):
+        with duckdb.connect() as con:
+            con.register("nascimentos", registros())
+            con.register("populacao", populacao())
+            dimensoes(con)
+            fatos(con)
+            filtro = "ano_sk = 2010 AND municipio_sk = 1"
+            con.execute(f"UPDATE fato_registros SET nascidos = nascidos + 1 WHERE faixa_sk = 1 AND {filtro}")
+            con.execute(f"UPDATE fato_registros SET nascidos = nascidos - 1 WHERE faixa_sk = 2 AND {filtro}")
+            soma = con.sql("SELECT sum(nascidos) FROM fato_registros").fetchone()[0]
+            self.assertEqual(soma, registros()["nascidos"].sum())
+            with self.assertRaisesRegex(ModeloInvalido, "células"):
+                conferir_celulas(con)
 
 
 if __name__ == "__main__":

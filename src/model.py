@@ -1,5 +1,6 @@
-"""Constrói e reconcilia a camada dimensional gold a partir da trusted."""
+"""Constrói o modelo estrela em data/gold/ a partir da trusted, conferindo tudo antes de gravar."""
 
+import argparse
 import shutil
 import sys
 import tempfile
@@ -10,268 +11,272 @@ if __package__ in (None, ""):
 
 import duckdb
 import pandas as pd
+import pandera.pandas as pa
 
-from src.prepare import RAIZ, TRUSTED, validar_base
-from src.transform import FAIXAS
+from src.transform import CONTRATO, CONTRATO_POPULACAO, FAIXAS
 
 
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+RAIZ = Path(__file__).resolve().parents[1]
+TRUSTED = RAIZ / "data/trusted/nascimentos.parquet"
+TRUSTED_POPULACAO = RAIZ / "data/trusted/populacao.parquet"
 DIR_GOLD = RAIZ / "data/gold"
-ANOS = tuple(range(2003, 2025))
-TABELAS = (
+ANOS = (2003, 2024)  # primeiro e último ano da dim_ano, os dois incluídos
+
+TABELAS_TRUSTED = ("nascimentos", "populacao")
+TABELAS_GOLD = (
     "dim_municipio", "dim_ano", "dim_faixa_idade", "dim_origem_valor",
-    "fato_registros", "fato_registros_municipio_ano",
+    "fato_registros", "fato_populacao", "fato_registros_municipio_ano",
 )
-TABELAS_TRUSTED = ("nascimentos",)
-TABELAS_GOLD = TABELAS
+# Ordem das linhas de cada tabela gravada: a mesma trusted dá sempre os mesmos arquivos
+ORDEM = {
+    "dim_municipio": "municipio_sk", "dim_ano": "ano_sk", "dim_faixa_idade": "faixa_sk",
+    "dim_origem_valor": "origem_sk", "fato_registros": "municipio_sk, ano_sk, faixa_sk",
+    "fato_populacao": "municipio_sk, ano_sk", "fato_registros_municipio_ano": "municipio_sk, ano_sk",
+}
+
+# (tabela da trusted, dimensão, chave natural, chave substituta)
 CHAVES = (
-    ("dim_municipio", "cod_municipio", "municipio_sk"),
-    ("dim_ano", "ano", "ano_sk"),
-    ("dim_faixa_idade", "faixa_idade_mae", "faixa_sk"),
-    ("dim_origem_valor", "valor_era_traco", "origem_sk"),
+    ("nascimentos", "dim_municipio", "cod_municipio", "municipio_sk"),
+    ("nascimentos", "dim_ano", "ano", "ano_sk"),
+    ("nascimentos", "dim_faixa_idade", "faixa_idade_mae", "faixa_sk"),
+    ("nascimentos", "dim_origem_valor", "valor_era_traco", "origem_sk"),
+    ("populacao", "dim_municipio", "cod_municipio", "municipio_sk"),
+    ("populacao", "dim_ano", "ano", "ano_sk"),
 )
+
+# (medida, consulta na trusted, consulta no gold)
 CONFERENCIA = (
-    ("linhas_fato_central", "SELECT COUNT(*) FROM trusted", "SELECT COUNT(*) FROM central"),
-    ("nascidos_total", "SELECT SUM(nascidos) FROM trusted", "SELECT SUM(nascidos) FROM central"),
-    ("pares_municipio_ano", "SELECT COUNT(*) FROM (SELECT DISTINCT cod_municipio, ano FROM trusted)",
-     "SELECT COUNT(*) FROM agregada"),
-    ("nascidos_agregada", "SELECT SUM(nascidos) FROM trusted", "SELECT SUM(registros) FROM agregada"),
-    ("idade_ignorada", "SELECT SUM(nascidos) FROM trusted WHERE faixa_idade_mae = 'Ignorada'",
-     "SELECT SUM(registros_idade_ignorada) FROM agregada"),
-    ("celulas_era_traco", "SELECT SUM(CAST(valor_era_traco AS BIGINT)) FROM trusted",
-     "SELECT SUM(celulas_era_traco) FROM agregada"),
+    ("linhas de registros", "SELECT COUNT(*) FROM nascimentos", "SELECT COUNT(*) FROM fato_registros"),
+    ("nascidos", "SELECT SUM(nascidos) FROM nascimentos", "SELECT SUM(nascidos) FROM fato_registros"),
+    ("células que eram traço",
+     "SELECT COUNT(*) FILTER (WHERE valor_era_traco) FROM nascimentos",
+     "SELECT COUNT(*) FROM fato_registros JOIN dim_origem_valor USING (origem_sk) WHERE valor_era_traco"),
+    ("linhas de população", "SELECT COUNT(*) FROM populacao", "SELECT COUNT(*) FROM fato_populacao"),
+    ("população", "SELECT SUM(populacao) FROM populacao", "SELECT SUM(populacao) FROM fato_populacao"),
 )
+
+# (medida, consulta na fato_registros, consulta na agregada)
+CONFERENCIA_AGREGADA = (
+    ("pares município-ano",
+     "SELECT COUNT(*) FROM (SELECT DISTINCT municipio_sk, ano_sk FROM fato_registros)",
+     "SELECT COUNT(*) FROM fato_registros_municipio_ano"),
+    ("registros", "SELECT SUM(nascidos) FROM fato_registros",
+     "SELECT SUM(registros) FROM fato_registros_municipio_ano"),
+    ("registros com idade ignorada",
+     "SELECT SUM(nascidos) FROM fato_registros JOIN dim_faixa_idade USING (faixa_sk) "
+     "WHERE faixa_idade_mae = 'Ignorada'",
+     "SELECT SUM(registros_idade_ignorada) FROM fato_registros_municipio_ano"),
+    ("células que eram traço",
+     "SELECT COUNT(*) FROM fato_registros JOIN dim_origem_valor USING (origem_sk) WHERE valor_era_traco",
+     "SELECT SUM(celulas_era_traco) FROM fato_registros_municipio_ano"),
+)
+
+# Classes de tamanho do IBGE agrupadas em quatro; a população de 2003 é a do início da série
+PORTE_2003 = """
+    CASE WHEN p.populacao IS NULL   THEN 'sem estimativa em 2003'
+         WHEN p.populacao <= 20000  THEN 'até 20 mil'
+         WHEN p.populacao <= 50000  THEN '20 a 50 mil'
+         WHEN p.populacao <= 100000 THEN '50 a 100 mil'
+         ELSE 'mais de 100 mil' END
+"""
+GRUPO_IDADE = {
+    "Menos de 15 anos": "menos de 20 anos", "15 a 19 anos": "menos de 20 anos",
+    "20 a 24 anos": "20 a 29 anos", "25 a 29 anos": "20 a 29 anos",
+    "30 a 34 anos": "30 anos ou mais", "35 a 39 anos": "30 anos ou mais",
+    "40 a 44 anos": "30 anos ou mais", "45 a 49 anos": "30 anos ou mais",
+    "50 anos ou mais": "30 anos ou mais", "Ignorada": "Ignorada",
+}
 
 
 class ModeloInvalido(ValueError):
-    """Erro de chave, granularidade ou reconciliação; nada deve ser publicado."""
+    """Chave, granularidade ou conferência que não bate: nada é gravado."""
 
 
-def dimensoes(base: pd.DataFrame, anos: tuple[int, ...] = ANOS) -> dict[str, pd.DataFrame]:
-    """Criar dimensões com SK estáveis na reconstrução integral e ordem explícita."""
-    if tuple(sorted(set(anos))) != anos or not anos:
-        raise ModeloInvalido("A dimensão ano requer anos distintos, crescentes e não vazios.")
-    codigos = base[["cod_municipio", "municipio"]].drop_duplicates()
-    if codigos.cod_municipio.duplicated().any():
-        raise ModeloInvalido("Código natural aponta para nomes municipais conflitantes.")
-    with duckdb.connect() as con:
-        con.register("codigos", codigos)
-        municipios = con.sql("""
-            SELECT ROW_NUMBER() OVER (ORDER BY cod_municipio) AS municipio_sk,
-                   cod_municipio, municipio FROM codigos ORDER BY cod_municipio
-        """).df()
-        # Calendário anual, inclusivo, independentemente de haver eventos.
-        dim_ano = con.sql(f"""
-            SELECT ano AS ano_sk, ano, (ano // 10) * 10 AS decada
-            FROM generate_series({anos[0]}, {anos[-1]}) AS calendario(ano)
-            WHERE ano IN ({','.join(map(str, anos))}) ORDER BY ano
-        """).df()
-    municipios["uf"] = "MA"
-    municipios["regiao"] = "Nordeste"
+# ============================================================
+# ENTRADA
+# ============================================================
 
-    dim_faixa = pd.DataFrame({
+def validar_base(df: pd.DataFrame) -> pd.DataFrame:
+    """Para antes de modelar uma trusted vazia, ambígua ou com município-ano incompleto."""
+    try:
+        base = CONTRATO.validate(df, lazy=True)
+    except pa.errors.SchemaErrors as erro:
+        raise ModeloInvalido(f"Trusted fora do contrato:\n{erro.failure_cases}") from erro
+    if base.empty:
+        raise ModeloInvalido("Trusted vazia: execute o ingest.py e o transform.py.")
+    if base.groupby("cod_municipio")["municipio"].nunique().gt(1).any():
+        raise ModeloInvalido("Código de município com mais de um nome.")
+    if base.groupby(["cod_municipio", "ano"]).size().ne(len(FAIXAS)).any():
+        raise ModeloInvalido("Município-ano sem as dez faixas: ausência não é zero.")
+    return base
+
+
+# ============================================================
+# DIMENSÕES
+# ============================================================
+
+def dimensoes(con: duckdb.DuckDBPyConnection, anos: tuple[int, int] = ANOS) -> None:
+    """Cria as quatro dimensões, cada uma com uma linha por membro."""
+    con.execute(f"""
+        CREATE TABLE dim_municipio AS
+        WITH codigos AS (SELECT DISTINCT cod_municipio, municipio FROM nascimentos),
+             p AS (SELECT cod_municipio, populacao FROM populacao WHERE ano = 2003)
+        SELECT ROW_NUMBER() OVER (ORDER BY cod_municipio) AS municipio_sk,
+               cod_municipio, municipio, {PORTE_2003} AS porte_2003
+        FROM codigos LEFT JOIN p USING (cod_municipio)
+    """)
+    # Uma linha por ano do período inteiro, sem olhar os anos que aparecem nos registros
+    con.execute(f"""
+        CREATE TABLE dim_ano AS
+        SELECT ano AS ano_sk, ano, (ano // 10) * 10 AS decada
+        FROM generate_series({anos[0]}, {anos[-1]}) AS t(ano)
+    """)
+    faixas = pd.DataFrame({
+        "faixa_sk": range(1, len(FAIXAS) + 1),
         "faixa_idade_mae": FAIXAS,
-        "ordem": range(1, len(FAIXAS) + 1),
-        "idade_conhecida": [faixa != "Ignorada" for faixa in FAIXAS],
+        "grupo_idade": [GRUPO_IDADE[faixa] for faixa in FAIXAS],
     })
-    dim_faixa.insert(0, "faixa_sk", range(1, len(dim_faixa) + 1))
-
-    dim_origem = pd.DataFrame({
-        "valor_era_traco": [False, True],
-        "descricao": ["Valor numérico publicado", "Traço publicado, convertido em zero"],
-    })
-    dim_origem.insert(0, "origem_sk", range(1, len(dim_origem) + 1))
-
-    return {
-        "dim_municipio": municipios,
-        "dim_ano": dim_ano,
-        "dim_faixa_idade": dim_faixa,
-        "dim_origem_valor": dim_origem,
-    }
+    con.register("faixas", faixas)
+    con.execute("CREATE TABLE dim_faixa_idade AS SELECT * FROM faixas")
+    con.execute("""
+        CREATE TABLE dim_origem_valor AS
+        SELECT ROW_NUMBER() OVER (ORDER BY valor_era_traco) AS origem_sk, valor_era_traco, descricao
+        FROM (VALUES (false, 'valor publicado em número'),
+                     (true,  'publicado como traço, convertido em zero')) AS t(valor_era_traco, descricao)
+    """)
 
 
-def _conferir_dimensao(
-    fonte: pd.DataFrame, dimensao: pd.DataFrame, natural: str, surrogate: str,
-) -> None:
-    """Falhar com chave natural órfã antes de trocar por chave substituta."""
-    if dimensao[natural].duplicated().any() or dimensao[surrogate].duplicated().any():
-        raise ModeloInvalido(f"{dimensao.columns[0]} não é única em {natural}/{surrogate}.")
-    faltantes = fonte[[natural]].drop_duplicates().merge(
-        dimensao[[natural]], on=natural, how="left", indicator=True, validate="one_to_one",
-    )
-    faltantes = faltantes.loc[faltantes["_merge"].eq("left_only"), natural]
-    if not faltantes.empty:
-        amostra = faltantes.head(5).tolist()
-        raise ModeloInvalido(f"{len(faltantes)} chaves sem dimensão para {natural}: {amostra}")
+def conferir_chaves(con: duckdb.DuckDBPyConnection) -> None:
+    """Antes de montar as fatos: uma linha por membro e nenhuma chave da trusted sem dimensão."""
+    for dimensao in dict.fromkeys(d for _, d, _, _ in CHAVES):
+        natural, substituta = next((n, s) for _, d, n, s in CHAVES if d == dimensao)
+        linhas, naturais, substitutas = con.sql(
+            f"SELECT COUNT(*), COUNT(DISTINCT {natural}), COUNT(DISTINCT {substituta}) FROM {dimensao}"
+        ).fetchone()
+        if not linhas == naturais == substitutas:
+            raise ModeloInvalido(f"{dimensao}: {linhas} linhas para {naturais} valores de {natural}")
+
+    print("linhas cuja chave não está na dimensão, antes da troca:")
+    total, faltando = 0, []
+    for tabela, dimensao, natural, _ in CHAVES:
+        orfas = con.sql(f"""
+            SELECT t.{natural} AS chave, COUNT(*) AS linhas
+            FROM {tabela} t LEFT JOIN {dimensao} d USING ({natural})
+            WHERE d.{natural} IS NULL GROUP BY 1 ORDER BY 1
+        """).fetchall()
+        linhas = sum(n for _, n in orfas)
+        print(f"  {tabela + '.' + natural:30} -> {dimensao:18} {linhas:6}")
+        if orfas:
+            total += linhas
+            faltando.append(f"{tabela}.{natural} = {[chave for chave, _ in orfas][:5]} não está em {dimensao}")
+    if faltando:
+        raise ModeloInvalido(f"{total} linhas sem chave na dimensão ({'; '.join(faltando)}). "
+                             "Corrija a dimensão antes de construir as fatos.")
 
 
-def fatos(
-    base: pd.DataFrame,
-    dims: dict[str, pd.DataFrame],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Trocar chaves naturais e construir fatos no grão declarado, sem INNER JOIN."""
-    fato = base.copy()
-    for tabela, natural, surrogate in CHAVES:
-        dim = dims[tabela]
-        _conferir_dimensao(fato, dim, natural, surrogate)
-        fato = fato.merge(
-            dim[[natural, surrogate]], on=natural, how="left", validate="many_to_one",
+# ============================================================
+# FATOS
+# ============================================================
+
+def fatos(con: duckdb.DuckDBPyConnection) -> None:
+    """Troca as chaves naturais pelas substitutas. LEFT JOIN: linha sem par fica, com chave nula."""
+    con.execute("""
+        CREATE TABLE fato_registros AS
+        SELECT m.municipio_sk, a.ano_sk, f.faixa_sk, o.origem_sk, n.nascidos
+        FROM nascimentos n
+        LEFT JOIN dim_municipio m USING (cod_municipio)
+        LEFT JOIN dim_ano a USING (ano)
+        LEFT JOIN dim_faixa_idade f USING (faixa_idade_mae)
+        LEFT JOIN dim_origem_valor o USING (valor_era_traco)
+    """)
+    # População é do município no ano: fica numa fato própria, sem se repetir por faixa de idade
+    con.execute("""
+        CREATE TABLE fato_populacao AS
+        SELECT m.municipio_sk, a.ano_sk, p.populacao
+        FROM populacao p
+        LEFT JOIN dim_municipio m USING (cod_municipio)
+        LEFT JOIN dim_ano a USING (ano)
+    """)
+    for fato, chaves in (("fato_registros", "municipio_sk, ano_sk, faixa_sk"),
+                         ("fato_populacao", "municipio_sk, ano_sk")):
+        alguma_nula = " OR ".join(f"{chave} IS NULL" for chave in chaves.split(", "))
+        nulas = con.sql(f"SELECT COUNT(*) FROM {fato} WHERE {alguma_nula}").fetchone()[0]
+        repetidas = con.sql(f"SELECT COUNT(*) - COUNT(DISTINCT ({chaves})) FROM {fato}").fetchone()[0]
+        if nulas or repetidas:
+            raise ModeloInvalido(f"{fato}: {nulas} linhas com chave nula e {repetidas} repetidas na granularidade")
+
+
+def agregada(con: duckdb.DuckDBPyConnection) -> None:
+    """Resume a fato_registros por município e ano, a granularidade da fato_populacao."""
+    con.execute("""
+        CREATE TABLE fato_registros_municipio_ano AS
+        SELECT r.municipio_sk, r.ano_sk,
+               SUM(r.nascidos)::BIGINT AS registros,
+               COALESCE(SUM(r.nascidos) FILTER (WHERE f.faixa_idade_mae = 'Ignorada'), 0)::BIGINT
+                   AS registros_idade_ignorada,
+               COUNT(*) FILTER (WHERE o.valor_era_traco)::BIGINT AS celulas_era_traco
+        FROM fato_registros r
+        LEFT JOIN dim_faixa_idade f USING (faixa_sk)
+        LEFT JOIN dim_origem_valor o USING (origem_sk)
+        GROUP BY r.municipio_sk, r.ano_sk
+    """)
+
+
+# ============================================================
+# CONFERÊNCIA
+# ============================================================
+
+def comparar(con: duckdb.DuckDBPyConnection, titulo: str, colunas: tuple[str, str], linhas) -> None:
+    """Imprime as duas contas lado a lado e para se alguma não bater."""
+    print(f"\n{titulo}:")
+    print(f"  {'':30} {colunas[0]:>15} {colunas[1]:>15}")
+    divergentes = []
+    for medida, consulta_origem, consulta_gold in linhas:
+        origem = con.sql(consulta_origem).fetchone()[0]
+        gold = con.sql(consulta_gold).fetchone()[0]
+        print(f"  {medida:30} {origem:>15} {gold:>15}")
+        if origem != gold:
+            divergentes.append(medida)
+    if divergentes:
+        raise ModeloInvalido(f"{titulo}: não bateu em {divergentes}")
+
+
+def conferir_celulas(con: duckdb.DuckDBPyConnection) -> None:
+    """Confere cada célula: duas trocas que se anulam passam na soma, mas não aqui."""
+    diferentes = con.sql("""
+        WITH gold AS (
+            SELECT m.cod_municipio, a.ano, f.faixa_idade_mae, o.valor_era_traco, r.nascidos
+            FROM fato_registros r
+            JOIN dim_municipio m USING (municipio_sk) JOIN dim_ano a USING (ano_sk)
+            JOIN dim_faixa_idade f USING (faixa_sk) JOIN dim_origem_valor o USING (origem_sk)
         )
-
-    chaves = ["municipio_sk", "ano_sk", "faixa_sk", "origem_sk"]
-    if fato[chaves].isna().any().any():
-        raise ModeloInvalido("Chave substituta nula após LEFT JOIN dimensional.")
-    if fato.duplicated(chaves).any():
-        raise ModeloInvalido("A fato central não é única no grão município-ano-faixa-origem.")
-    central = fato[chaves + ["nascidos"]].sort_values(chaves).reset_index(drop=True)
-
-    # A API retorna ambas para manter compatibilidade; a agregação tem função própria.
-    return central, agregada(central, dims)
-
-
-def agregada(central: pd.DataFrame, dims: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Materializar o resumo município-ano em DuckDB, como na aula de aplicação."""
-    with duckdb.connect() as con:
-        con.register("central", central)
-        con.register("faixas", dims["dim_faixa_idade"])
-        con.register("origens", dims["dim_origem_valor"])
-        return con.sql("""
-            SELECT municipio_sk, ano_sk, SUM(nascidos)::BIGINT AS registros,
-                   SUM(CASE WHEN faixa_idade_mae = 'Ignorada' THEN nascidos ELSE 0 END)::BIGINT
-                       AS registros_idade_ignorada,
-                   SUM(CAST(valor_era_traco AS BIGINT))::BIGINT AS celulas_era_traco
-            FROM central LEFT JOIN faixas USING (faixa_sk)
-                         LEFT JOIN origens USING (origem_sk)
-            GROUP BY municipio_sk, ano_sk ORDER BY municipio_sk, ano_sk
-        """).df()
+        SELECT COUNT(*) FROM nascimentos n FULL JOIN gold g USING (cod_municipio, ano, faixa_idade_mae)
+        WHERE n.nascidos IS DISTINCT FROM g.nascidos
+           OR n.valor_era_traco IS DISTINCT FROM g.valor_era_traco
+    """).fetchone()[0]
+    diferentes += con.sql("""
+        WITH gold AS (
+            SELECT m.cod_municipio, a.ano, p.populacao
+            FROM fato_populacao p JOIN dim_municipio m USING (municipio_sk) JOIN dim_ano a USING (ano_sk)
+        )
+        SELECT COUNT(*) FROM populacao t FULL JOIN gold g USING (cod_municipio, ano)
+        WHERE t.populacao IS DISTINCT FROM g.populacao
+    """).fetchone()[0]
+    print(f"  {'células diferentes':30} {diferentes:>31}")
+    if diferentes:
+        raise ModeloInvalido(f"{diferentes} células do gold diferentes da trusted")
 
 
-def reconciliar(
-    base: pd.DataFrame,
-    dims: dict[str, pd.DataFrame],
-    central: pd.DataFrame,
-    agregada: pd.DataFrame,
-) -> pd.DataFrame:
-    """Comparar linhas, totais e cada grupo antes de publicar qualquer arquivo."""
-    if len(central) != len(base):
-        raise ModeloInvalido(f"Linhas trusted={len(base)}, central={len(central)}.")
-    if central.nascidos.sum() != base.nascidos.sum():
-        raise ModeloInvalido("A soma de nascidos não reconcilia trusted/central.")
-    municipio = dims["dim_municipio"][["municipio_sk", "cod_municipio"]]
-    ano = dims["dim_ano"][["ano_sk", "ano"]]
-    faixa = dims["dim_faixa_idade"][["faixa_sk", "faixa_idade_mae"]]
-    origem = dims["dim_origem_valor"][["origem_sk", "valor_era_traco"]]
-    central_natural = (
-        central.merge(municipio, on="municipio_sk", how="left", validate="many_to_one")
-        .merge(ano, on="ano_sk", how="left", validate="many_to_one")
-        .merge(faixa, on="faixa_sk", how="left", validate="many_to_one")
-        .merge(origem, on="origem_sk", how="left", validate="many_to_one")
-    )
-    trusted_grupo = base.groupby(
-        ["cod_municipio", "ano", "faixa_idade_mae"], as_index=False, sort=True,
-    ).agg(nascidos_trusted=("nascidos", "sum"), tracos_trusted=("valor_era_traco", "sum"))
-    gold_grupo = central_natural.groupby(
-        ["cod_municipio", "ano", "faixa_idade_mae"], as_index=False, sort=True,
-    ).agg(nascidos_gold=("nascidos", "sum"), tracos_gold=("valor_era_traco", "sum"))
-    por_faixa = trusted_grupo.merge(
-        gold_grupo, on=["cod_municipio", "ano", "faixa_idade_mae"],
-        how="outer", indicator=True, validate="one_to_one",
-    )
-    if not por_faixa["_merge"].eq("both").all():
-        raise ModeloInvalido("Chaves município-ano-faixa divergentes na fato central.")
-    if not (por_faixa.nascidos_trusted.eq(por_faixa.nascidos_gold)
-            & por_faixa.tracos_trusted.eq(por_faixa.tracos_gold)).all():
-        raise ModeloInvalido("Medidas divergentes na reconciliação por município-ano-faixa.")
-    if len(agregada) != base[["cod_municipio", "ano"]].drop_duplicates().shape[0]:
-        raise ModeloInvalido("Contagem de pares trusted/agregada não reconcilia.")
+# ============================================================
+# GRAVAÇÃO
+# ============================================================
 
-    esperado = base.groupby(
-        ["cod_municipio", "ano"], as_index=False, sort=True,
-    ).agg(
-        registros_esperados=("nascidos", "sum"),
-        ignorada_esperada=("nascidos", lambda s: int(s[base.loc[s.index, "faixa_idade_mae"].eq("Ignorada")].sum())),
-        tracos_esperados=("valor_era_traco", "sum"),
-    )
-    codigos = municipio
-    anos = ano
-    observado = (
-        agregada.merge(codigos, on="municipio_sk", how="left", validate="many_to_one")
-        .merge(anos, on="ano_sk", how="left", validate="many_to_one")
-    )
-    comparacao = esperado.merge(
-        observado, on=["cod_municipio", "ano"], how="outer", indicator=True, validate="one_to_one",
-    )
-    if not comparacao["_merge"].eq("both").all():
-        raise ModeloInvalido("Pares município-ano órfãos na reconciliação da agregada.")
-    medidas = [
-        ("registros_esperados", "registros"),
-        ("ignorada_esperada", "registros_idade_ignorada"),
-        ("tracos_esperados", "celulas_era_traco"),
-    ]
-    linhas = []
-    with duckdb.connect() as con:
-        con.register("trusted", base)
-        con.register("central", central)
-        con.register("agregada", agregada)
-        for nome, consulta_trusted, consulta_gold in CONFERENCIA:
-            a = int(con.sql(consulta_trusted).fetchone()[0])
-            b = int(con.sql(consulta_gold).fetchone()[0])
-            if a != b:
-                raise ModeloInvalido(f"Conferência {nome} divergiu: trusted={a}, gold={b}.")
-            linhas.append({"medida": nome, "trusted": a, "gold": b})
-    for origem, destino in medidas:
-        if not (comparacao[origem] == comparacao[destino]).all():
-            raise ModeloInvalido(f"Reconciliação por município-ano falhou em {destino}.")
-    return pd.DataFrame(linhas)
-
-
-def _conferir_dominios(dims: dict[str, pd.DataFrame], anos: tuple[int, ...]) -> None:
-    if tuple(dims["dim_ano"].ano) != anos:
-        raise ModeloInvalido("Dimensão ano não cobre exatamente o calendário declarado.")
-    if dims["dim_faixa_idade"].faixa_idade_mae.tolist() != FAIXAS:
-        raise ModeloInvalido("Domínio ou ordem das faixas não reconcilia.")
-    if set(dims["dim_origem_valor"].valor_era_traco) != {False, True}:
-        raise ModeloInvalido("Dimensão de origem deve cobrir traço e valor numérico.")
-
-
-def fato_populacao(base: pd.DataFrame, dims: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """População fica em fato própria, nunca repetida por faixa etária.
-
-    As dimensões município e ano são conformadas às dos registros. A origem
-    da medida é preservada como atributos degenerados tabela/variável.
-    """
-    from src.population import CONTRATO
-
-    base = CONTRATO.validate(base, lazy=True)
-    fato = base.copy()
-    for tabela, natural, surrogate in (
-        ("dim_municipio", "cod_municipio", "municipio_sk"),
-        ("dim_ano", "ano", "ano_sk"),
-    ):
-        dim = dims[tabela]
-        _conferir_dimensao(fato, dim, natural, surrogate)
-        fato = fato.merge(dim[[natural, surrogate]], on=natural, how="left", validate="many_to_one")
-    chaves = ["municipio_sk", "ano_sk"]
-    if fato[chaves].isna().any().any() or fato.duplicated(chaves).any():
-        raise ModeloInvalido("Chave populacional órfã ou duplicada.")
-    saida = fato[chaves + ["populacao", "tabela", "variavel"]].sort_values(chaves).reset_index(drop=True)
-    reconstruida = (
-        saida.merge(dims["dim_municipio"][["municipio_sk", "cod_municipio"]],
-                    on="municipio_sk", validate="many_to_one")
-        .merge(dims["dim_ano"][["ano_sk", "ano"]], on="ano_sk", validate="many_to_one")
-    )
-    colunas = ["cod_municipio", "ano", "populacao", "tabela", "variavel"]
-    pd.testing.assert_frame_equal(
-        base[colunas].sort_values(colunas[:2]).reset_index(drop=True),
-        reconstruida[colunas].sort_values(colunas[:2]).reset_index(drop=True),
-    )
-    return saida
-
-
-def _publicar(
-    tabelas: dict[str, pd.DataFrame],
-    destino: Path,
-) -> None:
-    """Gravar em staging, reler, e trocar o diretório inteiro só após validação."""
+def publicar(tabelas: dict[str, pd.DataFrame], destino: Path) -> None:
+    """Grava numa pasta temporária, relê cada arquivo e só então troca a pasta inteira."""
     destino.parent.mkdir(parents=True, exist_ok=True)
     staging_raiz = Path(tempfile.mkdtemp(prefix=".gold-stage-", dir=destino.parent))
     staging = staging_raiz / destino.name
@@ -281,8 +286,7 @@ def _publicar(
         for nome, tabela in tabelas.items():
             caminho = staging / f"{nome}.parquet"
             tabela.to_parquet(caminho, index=False)
-            relida = pd.read_parquet(caminho)
-            pd.testing.assert_frame_equal(tabela, relida, check_dtype=True)
+            pd.testing.assert_frame_equal(tabela, pd.read_parquet(caminho))
         if destino.exists():
             destino.replace(backup)
         try:
@@ -300,54 +304,52 @@ def _publicar(
 
 def construir(
     origem: Path = TRUSTED,
+    origem_populacao: Path = TRUSTED_POPULACAO,
     destino: Path = DIR_GOLD,
-    anos: tuple[int, ...] = ANOS,
-    origem_populacao: Path | None = None,
+    anos: tuple[int, int] = ANOS,
     remover_ano_dimensao: int | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Executar fail-stop em memória; nenhuma tabela é publicada antes de reconciliar."""
-    if not origem.exists():
-        raise FileNotFoundError(f"Trusted não encontrada em {origem}.")
-    base = validar_base(pd.read_parquet(origem))
-    if not set(base.ano).issubset(anos):
-        raise ModeloInvalido("Trusted contém ano ausente do calendário dimensional.")
-    dims = dimensoes(base, anos)
-    _conferir_dominios(dims, anos)
-    if remover_ano_dimensao is not None:
-        # Injeção de falha explícita para a evidência exigida na atividade.
-        dims["dim_ano"] = dims["dim_ano"].loc[dims["dim_ano"].ano.ne(remover_ano_dimensao)]
-    central, agregada = fatos(base, dims)
-    reconciliacao = reconciliar(base, dims, central, agregada)
-    tabelas = {**dims, "fato_registros": central,
-               "fato_registros_municipio_ano": agregada}
-    if origem_populacao is not None:
-        populacao = pd.read_parquet(origem_populacao)
-        tabelas["fato_populacao"] = fato_populacao(populacao, dims)
-        resumo_pop = pd.DataFrame([
-            {"medida": "linhas_populacao", "trusted": len(populacao), "gold": len(tabelas["fato_populacao"])},
-            # Total de células-pessoas só verifica transporte, não pessoas únicas no tempo.
-            {"medida": "soma_celulas_populacao", "trusted": int(populacao.populacao.sum()),
-             "gold": int(tabelas["fato_populacao"].populacao.sum())},
-        ])
-        reconciliacao = pd.concat([reconciliacao, resumo_pop], ignore_index=True)
-    _publicar(tabelas, destino)
+    """Monta tudo em memória; só grava em data/gold/ se todas as conferências passarem."""
+    for arquivo in (origem, origem_populacao):
+        if not arquivo.exists():
+            raise FileNotFoundError(f"Trusted não encontrada em {arquivo}: execute o transform.py.")
+    nascimentos = validar_base(pd.read_parquet(origem))
+    populacao = CONTRATO_POPULACAO.validate(pd.read_parquet(origem_populacao))
+
+    with duckdb.connect() as con:
+        con.register("nascimentos", nascimentos)
+        con.register("populacao", populacao)
+
+        dimensoes(con, anos)
+        if remover_ano_dimensao is not None:
+            # Simula uma linha de dimensão faltando, para conferir que o script para
+            con.execute("DELETE FROM dim_ano WHERE ano = ?", [remover_ano_dimensao])
+        conferir_chaves(con)
+        fatos(con)
+        comparar(con, "conferência das fatos contra a trusted", ("trusted", "gold"), CONFERENCIA)
+        conferir_celulas(con)
+        agregada(con)
+        comparar(con, "conferência da agregada contra a fato_registros",
+                 ("fato_registros", "agregada"), CONFERENCIA_AGREGADA)
+
+        tabelas = {nome: con.sql(f"SELECT * FROM {nome} ORDER BY {ORDEM[nome]}").df() for nome in TABELAS_GOLD}
+
+    publicar(tabelas, destino)
+    print(f"\ngold -> {destino.relative_to(RAIZ).as_posix() if destino.is_relative_to(RAIZ) else destino}")
     for nome, tabela in tabelas.items():
-        print(f"{nome:34} {len(tabela):6} linhas -> {destino / (nome + '.parquet')}")
-    print("\nReconciliação trusted × gold:")
-    print(reconciliacao.to_string(index=False))
-    return {**tabelas, "reconciliacao": reconciliacao}
+        print(f"  {nome:30} {len(tabela):6} linhas")
+    return tabelas
 
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--com-populacao", action="store_true", help="Incluir extensão populacional explicitamente")
-    parser.add_argument("--remover-ano-dimensao", type=int, help="Teste fail-stop: simular linha de dimensão faltando")
+    parser.add_argument(
+        "--remover-ano-dimensao", type=int, metavar="ANO",
+        help="tira um ano da dim_ano para conferir que o script para antes de gravar",
+    )
     args = parser.parse_args()
-    populacao = RAIZ / "data/trusted/populacao.parquet" if args.com_populacao else None
     try:
-        construir(origem_populacao=populacao, remover_ano_dimensao=args.remover_ano_dimensao)
+        construir(remover_ano_dimensao=args.remover_ano_dimensao)
     except ModeloInvalido as erro:
-        print(f"FAIL-STOP: {erro}\nNada foi gravado em data/gold/.", file=sys.stderr)
+        print(f"\n{erro}\nnada foi gravado em data/gold/")
         sys.exit(1)
