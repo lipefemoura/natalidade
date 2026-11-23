@@ -1,4 +1,5 @@
-"""Coleta nascidos vivos registrados por município do Maranhão (IBGE/SIDRA, tabela 2609)."""
+"""Coleta, por município do Maranhão, os nascidos vivos registrados (IBGE/SIDRA, tabela 2609)
+e a população residente estimada (IBGE/Agregados, tabela 6579)."""
 
 import json
 import time
@@ -19,6 +20,15 @@ ANO_FINAL = 2024
 FONTE = "IBGE/SIDRA - Tabela 2609 (Estatísticas do Registro Civil)"
 URL_BASE = "https://apisidra.ibge.gov.br/values"
 DIR_RAW = Path("data/raw/ibge_sidra_2609")
+
+FONTE_POPULACAO = "IBGE/Agregados v3 - Tabela 6579 (População residente estimada)"
+URL_POPULACAO = "https://servicodados.ibge.gov.br/api/v3/agregados/6579"
+DIR_RAW_POPULACAO = Path("data/raw/ibge_agregados_6579")
+# A tabela 6579 não publica estimativa nesses anos (anos de censo, de contagem e 2023)
+ANOS_SEM_ESTIMATIVA = (2007, 2010, 2022, 2023)
+ANOS_POPULACAO = tuple(
+    ano for ano in range(ANO_INICIAL, ANO_FINAL + 1) if ano not in ANOS_SEM_ESTIMATIVA
+)
 
 MAX_TENTATIVAS = 4
 TIMEOUT = 120
@@ -51,6 +61,23 @@ def montar_url(ano: int) -> str:
     return (
         f"{URL_BASE}/t/2609/n6/in%20n3%20{UF_CODIGO}/p/{ano}"
         f"/v/217/c2/0/c232/0/c240/all"
+    )
+
+
+def montar_url_populacao() -> str:
+    """Monta a URL da população de todos os anos publicados, numa só consulta.
+
+    Trechos da URL:
+        periodos/2003|2004|...   anos com estimativa publicada
+        variaveis/9324           população residente estimada (pessoas)
+        localidades=N6[N3[21]]   municípios (N6) da UF 21 (Maranhão)
+
+    São 217 municípios × 18 anos = 3.906 valores, abaixo do limite da API.
+    """
+    anos = "%7C".join(map(str, ANOS_POPULACAO))
+    return (
+        f"{URL_POPULACAO}/periodos/{anos}/variaveis/9324"
+        f"?localidades=N6%5BN3%5B{UF_CODIGO}%5D%5D"
     )
 
 
@@ -120,6 +147,19 @@ def validar(dados: list, ano: int) -> int:
     return registros
 
 
+def validar_populacao(dados: list) -> int:
+    """Valida a resposta da população e retorna o número de valores (município × ano)."""
+    try:
+        series = dados[0]["resultados"][0]["series"]
+    except (TypeError, KeyError, IndexError) as erro:
+        raise RuntimeError("População: resposta em formato inesperado.") from erro
+
+    valores = sum(len(item["serie"]) for item in series)
+    if valores == 0:
+        raise RuntimeError("População: a API não devolveu nenhum valor.")
+    return valores
+
+
 # ============================================================
 # SALVAMENTO
 # ============================================================
@@ -175,6 +215,47 @@ def main() -> None:
 
     anos = ANO_FINAL - ANO_INICIAL + 1
     print(f"\n{total} registros de {anos} anos ({baixados} baixados agora) em {pasta}")
+
+    coletar_populacao()
+
+
+def coletar_populacao() -> None:
+    """Coleta a população e os metadados da tabela 6579, que o transform.py confere.
+
+    Os metadados dizem a unidade, o nível territorial e os anos publicados: se a
+    tabela mudar, o transform.py para em vez de usar um dado com outro significado.
+    """
+    pasta = DIR_RAW_POPULACAO / date.today().isoformat()
+    consultas = {
+        "metadados": f"{URL_POPULACAO}/metadados",
+        "periodos": f"{URL_POPULACAO}/periodos",
+        "populacao": montar_url_populacao(),
+    }
+
+    print(f"\n{FONTE_POPULACAO}, UF {UF_CODIGO}, {len(ANOS_POPULACAO)} anos")
+
+    for nome, url in consultas.items():
+        destino = pasta / f"{nome}.json"
+
+        if destino.exists():  # idempotência
+            print(f"  {nome}: já coletado hoje")
+            continue
+
+        dados = requisitar(url)
+        envelope = {
+            "fonte": FONTE_POPULACAO,
+            "url": url,
+            "coletado_em": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "dado": dados,  # resposta original da API
+        }
+        if nome == "populacao":
+            envelope["registros"] = validar_populacao(dados)
+        salvar(envelope, destino)
+        detalhe = f" ({envelope['registros']} valores)" if nome == "populacao" else ""
+        print(f"  {nome}: coletado{detalhe}")
+        time.sleep(PAUSA_ENTRE_ANOS)
+
+    print(f"população em {pasta}")
 
 
 if __name__ == "__main__":
