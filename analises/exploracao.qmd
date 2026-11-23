@@ -1,201 +1,365 @@
 ---
-title: "Exploração dos registros de nascidos vivos"
-subtitle: "Atividade 02 · fonte original · período exploratório 2003–2020"
+title: "Exploração dos registros de nascidos vivos e da população"
+subtitle: "Municípios do Maranhão, 2003–2020 (2021–2024 guardados)"
+author:
+  - "Gustavo dos Santos Bandeira Rocha (20231SI0006)"
+  - "Deusiane Pimenta Rocha (20231SI0032)"
+  - "Felipe Moura de Oliveira (20231SI0027)"
+date: today
 lang: pt-BR
 format:
   html:
     toc: true
     embed-resources: true
-    code-fold: true
 execute:
+  echo: true
   warning: false
-  out-width: "100%"
 ---
 
-## 1. Preparação: parte separada e limite de independência
+## 1. A parte guardada
 
-Uma observação é a contagem de **registros em cartório** por município, ano e
-faixa de idade materna. O ano é de registro, não necessariamente de nascimento.
-Fonte principal: trusted da Etapa 1, SIDRA 2609, municípios do Maranhão.
+O dado tem ano, então a parte guardada é cortada pelo tempo: a exploração usa os registros e a população de **2003 a 2020**, e **2021 a 2024** ficam guardados para confirmar ou derrubar as previsões da tabela de hipóteses. O corte é pelo tempo, e não por sorteio de municípios, porque as perguntas são sobre tendências: uma previsão feita com os anos anteriores só se confirma de verdade nos anos seguintes. Dos quatro anos guardados, só 2021 e 2024 têm população publicada, e por isso as previsões que dependem da população usam esses dois.
 
-Corte temporal: **2003–2020 para exploração; 2021–2024 fora das views abaixo**.
-O corte preserva os anos mais recentes para comparação futura e evita mistura
-aleatória de anos. **A reserva não está intocada:** diagnóstico da Etapa 1,
-flat com alvo 2021, análises de pontas e quarentena global já usaram esses anos.
-Não é possível desfazer essa exposição. As previsões organizadas nesta revisão
-são pós-exploratórias, não hipóteses originalmente pré-registradas. Este documento
-não consulta nem confirma previsões na parte separada. Para cumprir literalmente
-uma confirmação independente na Etapa 3, será necessário um novo período/dado
-e revisão da equipe/professor. Essa limitação é declarada, não ocultada.
-
-## 2. Perguntas, colunas e expectativas (antes das consultas deste documento)
-
-| Pergunta | Colunas envolvidas | Expectativa e explicação alternativa |
-|---|---|---|
-| P1. Os registros diminuem mesmo mantendo os mesmos municípios? | ano, cod_municipio, nascidos | Recuo ao longo do tempo; queda do registro tardio pode explicar parte dele |
-| P2. O perfil materno difere entre o início e o fim exploratório? | ano, faixa_idade_mae, nascidos, cod_municipio | Participação de 30 anos ou mais cresce; não equivale a taxa de fecundidade |
-| P3. Idade ignorada distorce a comparação das faixas? | ano, faixa_idade_mae, nascidos, cod_municipio | Participação pequena mas variável; não redistribuir automaticamente |
+Todas as consultas deste documento passam pelas views abaixo, que já excluem a parte guardada.
 
 ```{python}
-# | label: preparacao-views
+# | label: preparacao
 import duckdb
 import matplotlib.pyplot as plt
 import pandas as pd
-from IPython.display import display
-from src.prepare import RAIZ, TRUSTED, FAIXAS, validar_base, explorar
+
+ANOS_EXPLORADOS = (2003, 2020)  # 2021 a 2024 ficam guardados
+INICIO = (2003, 2004, 2005)  # pontas da comparação: três anos de cada lado
+INICIO_POS_CENSO = (2011, 2012, 2013)
+FIM = (2018, 2019, 2020)
+TRINTA_OU_MAIS = ["30 a 34 anos", "35 a 39 anos", "40 a 44 anos", "45 a 49 anos", "50 anos ou mais"]
+FAIXAS_CONHECIDAS = ["Menos de 15 anos", "15 a 19 anos", "20 a 24 anos", "25 a 29 anos", *TRINTA_OU_MAIS]
 
 con = duckdb.connect()
-con.execute(f"CREATE VIEW trusted AS SELECT * FROM read_parquet('{TRUSTED.as_posix()}')")
-con.execute("CREATE VIEW base AS SELECT * FROM trusted WHERE ano BETWEEN 2003 AND 2020")
-con.execute("""CREATE VIEW totais AS
-    SELECT cod_municipio, municipio, ano, SUM(nascidos)::BIGINT AS registros
-    FROM base GROUP BY cod_municipio, municipio, ano""")
-con.execute("""CREATE VIEW coorte AS
-    SELECT cod_municipio FROM totais GROUP BY cod_municipio HAVING COUNT(DISTINCT ano)=18""")
-con.execute("CREATE VIEW balanceada AS SELECT * FROM totais WHERE cod_municipio IN (SELECT * FROM coorte)")
-base = validar_base(con.sql("SELECT * FROM base").df())
-resultados = explorar(base)
-serie = resultados["serie_anual"]
-totais = con.sql("SELECT * FROM totais ORDER BY cod_municipio, ano").df()
-plt.rcParams.update({"figure.figsize": (9, 4), "axes.spines.top": False,
-                     "axes.spines.right": False, "font.size": 10})
-assert base.ano.between(2003, 2020).all()
-print("Todas as consultas exploratórias usam base/totais/balanceada, sem reserva.")
+con.execute(f"""
+    CREATE VIEW registros AS
+    SELECT * FROM 'data/trusted/nascimentos.parquet'
+    WHERE ano BETWEEN {ANOS_EXPLORADOS[0]} AND {ANOS_EXPLORADOS[1]}
+""")
+con.execute(f"""
+    CREATE VIEW populacao AS
+    SELECT * FROM 'data/trusted/populacao.parquet'
+    WHERE ano BETWEEN {ANOS_EXPLORADOS[0]} AND {ANOS_EXPLORADOS[1]}
+""")
+con.execute("""
+    CREATE VIEW totais AS  -- um município e ano por linha
+    SELECT cod_municipio, municipio, ano, sum(nascidos)::BIGINT AS registros
+    FROM registros GROUP BY ALL
+""")
+con.execute("""
+    CREATE VIEW painel AS  -- só os municípios e anos com população publicada
+    SELECT t.*, p.populacao, 1000.0 * t.registros / p.populacao AS registros_por_mil
+    FROM totais t JOIN populacao p USING (cod_municipio, ano)
+""")
+con.sql("""
+    SELECT 'registros' AS view, min(ano) AS primeiro_ano, max(ano) AS ultimo_ano, count(*) AS linhas FROM registros
+    UNION ALL SELECT 'populacao', min(ano), max(ano), count(*) FROM populacao
+    UNION ALL SELECT 'painel', min(ano), max(ano), count(*) FROM painel
+""").df()
 ```
 
-## 3. Varredura: cada coluna sozinha
+## 2. Perguntas e expectativas
+
+Escritas antes de qualquer consulta deste documento.
+
+| Pergunta | Colunas | Expectativa |
+|:---|:---|:---|
+| **P1.** Há correlação entre o crescimento de um município e a queda da sua taxa de natalidade? | `cod_municipio`, `ano`, `nascidos`, `populacao` | Os municípios que mais cresceram tiveram uma queda **menor** da taxa, porque atraem gente jovem, em idade de ter filhos |
+| **P2.** A participação das mães de 30 anos ou mais nos registros está crescendo? | `ano`, `faixa_idade_mae`, `nascidos`, `cod_municipio` | Sim: a participação cresce ao longo do período, em quase todos os municípios |
+
+Duas medidas da P1 precisam de definição antes dos números. A **taxa** é o número de registros por mil habitantes do município no ano. Ela não é a taxa de natalidade do IBGE, porque o numerador são registros em cartório, que incluem crianças nascidas em anos anteriores (o registro tardio do diagnóstico). O **crescimento** é a variação da população entre as pontas do período. Cada ponta soma três anos, para que um ano atípico não decida sozinho a comparação: 2003 a 2005 no início e 2018 a 2020 no fim. A queda da taxa entre as pontas usa a razão das somas, isto é, registros somados sobre população somada, e não a média das taxas de cada ano.
+
+## 3. Uma coluna de cada vez
 
 ```{python}
-# | label: univariadas
-display(pd.DataFrame({"tipo": base.dtypes.astype(str), "distintos": base.nunique(),
-                      "nulos_pct": base.isna().mean()*100}))
-display(base[["ano", "nascidos", "total_municipio_ano"]].describe())
-display(base.faixa_idade_mae.value_counts().reindex(FAIXAS).to_frame("células"))
-display(base.valor_era_traco.value_counts().to_frame("células"))
-display(base.municipio.drop_duplicates().head(10).to_frame("exemplos de nomes"))
-fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
-axes[0].hist(totais.registros, bins=30, color="#087f8c")
-axes[0].set(xlabel="Registros por município-ano", ylabel="Frequência")
-axes[1].boxplot(totais.registros)
-axes[1].set(ylabel="Registros por município-ano", xticks=[])
+# | label: uma-coluna
+con.sql("""
+    SELECT 'registros por município e ano' AS coluna, count(*) AS n, min(registros) AS minimo,
+           quantile_cont(registros, 0.5) AS mediana, avg(registros) AS media, max(registros) AS maximo
+    FROM totais
+    UNION ALL
+    SELECT 'população por município e ano', count(*), min(populacao), quantile_cont(populacao, 0.5),
+           avg(populacao), max(populacao)
+    FROM populacao
+    UNION ALL
+    SELECT 'registros por mil habitantes', count(*), min(registros_por_mil),
+           quantile_cont(registros_por_mil, 0.5), avg(registros_por_mil), max(registros_por_mil)
+    FROM painel
+""").df().round(1)
+```
+
+```{python}
+# | label: uma-coluna-graficos
+totais = con.sql("SELECT * FROM totais").df()
+painel = con.sql("SELECT * FROM painel").df()
+fig, eixos = plt.subplots(1, 3, figsize=(11, 3.2))
+eixos[0].hist(totais["registros"], bins=60, color="#335c81")
+eixos[0].set(xscale="log", xlabel="registros por município e ano (log)", ylabel="municípios e anos")
+eixos[1].hist(painel["populacao"], bins=60, color="#335c81")
+eixos[1].set(xscale="log", xlabel="população (log)")
+eixos[2].hist(painel["registros_por_mil"], bins=60, color="#335c81")
+eixos[2].set(xlabel="registros por mil habitantes")
 plt.tight_layout()
 plt.show()
 ```
 
-Código e nome são identificadores, não medidas. O total municipal repete-se nas
-dez faixas e **não pode ser somado sobre elas**. Zeros de faixas são valores
-publicados, não lacunas. Extremos de porte não são eliminados pelo boxplot.
+```{python}
+# | label: uma-coluna-anos
+con.sql("""
+    SELECT ano, count(DISTINCT cod_municipio) AS municipios_com_registros,
+           (SELECT count(*) FROM populacao p WHERE p.ano = t.ano) AS municipios_com_populacao
+    FROM totais t GROUP BY ano ORDER BY ano
+""").df().set_index("ano").T
+```
 
-## 4. P1: duas colunas, terceira coluna e tabela cruzada
+Os registros e a população têm cauda longa à direita: a maior parte dos municípios é pequena, e São Luís fica muito acima de todos, por isso os dois primeiros histogramas estão em escala logarítmica. A taxa não depende do tamanho do município e se concentra em torno da mediana, com poucos casos extremos. A contagem por ano mostra as duas lacunas que as perguntas herdam. Faltam municípios em alguns anos, que são os pares em quarentena. E falta a população inteira em 2007 e 2010, os anos sem estimativa publicada, que por isso ficam fora de qualquer conta com taxa.
+
+## 4. P1: crescimento e queda da taxa
+
+### Duas colunas
 
 ```{python}
-# | label: pergunta-1
-# Duas: ano × registros; terceira: conjunto municipal constante/variável.
-display(serie)
-fig, ax = plt.subplots()
-ax.plot(serie.ano, serie.registros_aprovados, label="Aprovados no ano", color="#087f8c")
-ax.plot(serie.ano, serie.registros_coorte, label="Coorte constante", color="#c35b27")
-ax.set(xlabel="Ano do registro", ylabel="Registros", title="P1: cobertura variável versus constante")
-ax.set_xticks(range(2003, 2021, 2))
-ax.legend()
+# | label: p1-pontas
+def pontas(inicio, fim):
+    """Uma linha por município com as duas pontas completas: crescimento e quedas, pela razão das somas."""
+    return con.sql(f"""
+        WITH somas AS (
+            SELECT cod_municipio, municipio,
+                   sum(registros) FILTER (WHERE ano IN {inicio}) AS registros_inicio,
+                   sum(registros) FILTER (WHERE ano IN {fim})    AS registros_fim,
+                   sum(populacao) FILTER (WHERE ano IN {inicio}) AS populacao_inicio,
+                   sum(populacao) FILTER (WHERE ano IN {fim})    AS populacao_fim,
+                   count(*) FILTER (WHERE ano IN {inicio} OR ano IN {fim}) AS anos_nas_pontas
+            FROM painel GROUP BY ALL
+        )
+        SELECT *,
+               100 * (populacao_fim / populacao_inicio - 1) AS crescimento_pct,
+               100 * (1 - (registros_fim / populacao_fim) / (registros_inicio / populacao_inicio)) AS queda_taxa_pct,
+               100 * (1 - registros_fim / registros_inicio) AS queda_registros_pct
+        FROM somas WHERE anos_nas_pontas = {len(inicio) + len(fim)}
+        ORDER BY cod_municipio
+    """).df()
+
+
+longa = pontas(INICIO, FIM)
+print(f"municípios com as duas pontas completas: {len(longa)} de 217")
+print("correlação de Spearman entre crescimento e queda da taxa: "
+      f"{longa['crescimento_pct'].corr(longa['queda_taxa_pct'], method='spearman'):.2f}")
+longa[["crescimento_pct", "queda_taxa_pct", "queda_registros_pct"]].describe().round(1)
+```
+
+```{python}
+# | label: p1-dispersao
+fig, eixo = plt.subplots(figsize=(6, 4))
+eixo.scatter(longa["crescimento_pct"], longa["queda_taxa_pct"], s=14, alpha=0.6, color="#335c81")
+eixo.axhline(0, color="gray", linewidth=0.8)
+eixo.set(xlabel="crescimento da população, 2003–05 a 2018–20 (%)",
+         ylabel="queda da taxa de registros (%)")
 plt.tight_layout()
 plt.show()
-# Tabela cruzada: porte municipal inicial (2003) × fase temporal.
-porte = totais.loc[totais.ano.eq(2003), ["cod_municipio", "registros"]].copy()
-porte["porte_2003"] = pd.cut(porte.registros, [-1, 300, 1000, float("inf")],
-                             labels=["até 300", "301–1000", "mais de 1000"])
-recorte = totais.merge(porte[["cod_municipio", "porte_2003"]], on="cod_municipio", validate="many_to_one")
-recorte["fase"] = recorte.ano.map(lambda ano: "2003–2011" if ano <= 2011 else "2012–2020")
-display(pd.crosstab(recorte.porte_2003, recorte.fase, values=recorte.registros, aggfunc="sum"))
-for medida in ("registros_aprovados", "registros_coorte"):
-    print(medida, "variação 2003–2020 (%):", round(100*(serie[medida].iloc[-1]/serie[medida].iloc[0]-1), 2))
 ```
 
-A coorte de 193 municípios é definida somente em 2003–2020. Não resolve viés da
-quarentena, mas distingue queda de registros de parte da mudança de composição.
-A soma aprovada não representa o total oficial estadual.
+São 201 municípios com as duas pontas completas; os outros 16 têm algum dos seis anos em quarentena. A taxa caiu em 195 deles, com queda mediana de 46%. A dispersão mostra a relação contrária à esperada: quanto mais o município cresceu, **maior** a queda da taxa, com correlação de Spearman de 0,34. Antes de aceitar esse resultado, três explicações rivais precisam ser testadas.
 
-## 5. P2: duas colunas, terceira coluna e tabela cruzada
+1. **A própria conta.** A população está no denominador da taxa e também na medida de crescimento. Se um município ganha habitantes e mantém o mesmo número de registros, a taxa cai só por causa da divisão. Para separar essa parte, a mesma comparação é feita com a queda dos registros, sem dividir pela população.
+2. **O fim do registro tardio.** Em 2003, 44% dos registros do estado eram de crianças nascidas em anos anteriores. A ponta inicial, de 2003 a 2005, infla a taxa dos municípios com mais registro tardio.
+3. **A correção da estimativa depois do Censo de 2010.** O diagnóstico mostrou que a população de muitos municípios saltou em 2011, quando o IBGE refez as estimativas. Um crescimento medido de 2003 a 2020 atravessa esse salto e mistura crescimento real com correção.
+
+As duas últimas rivais se testam com uma ponta inicial depois do Censo, de 2011 a 2013, quando o registro tardio já era pequeno e as estimativas já tinham sido refeitas.
+
+### Uma terceira coluna
 
 ```{python}
-# | label: pergunta-2
-display(resultados["perfil_faixas"].round(2))
-# Duas: faixa × registros. Terceira: fase temporal, sempre na base exploratória.
-com_fase = base.assign(fase=base.ano.map(lambda ano: "2003–2011" if ano <= 2011 else "2012–2020"))
-cruzada = pd.crosstab(com_fase.faixa_idade_mae, com_fase.fase,
-                      values=com_fase.nascidos, aggfunc="sum").reindex(FAIXAS)
-display(cruzada)
-participacoes = 100*cruzada/cruzada.sum(axis=0)
-display(participacoes.round(2))
-participacoes.plot.barh(figsize=(9, 5), color=["#087f8c", "#c35b27"])
-plt.xlabel("Participação dos registros da fase (%)")
+# | label: p1-terceira-coluna
+pos_censo = pontas(INICIO_POS_CENSO, FIM)
+comparacoes = {"2003–05 a 2018–20": longa, "2011–13 a 2018–20": pos_censo}
+pd.DataFrame([
+    {"comparação": nome, "municípios": len(d),
+     "crescimento × queda da taxa": d["crescimento_pct"].corr(d["queda_taxa_pct"], method="spearman"),
+     "crescimento × queda dos registros": d["crescimento_pct"].corr(d["queda_registros_pct"], method="spearman")}
+    for nome, d in comparacoes.items()
+]).round(2)
+```
+
+```{python}
+# | label: p1-terceira-coluna-graficos
+fig, eixos = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
+for eixo, (nome, d) in zip(eixos, comparacoes.items()):
+    eixo.scatter(d["crescimento_pct"], d["queda_taxa_pct"], s=14, alpha=0.6, label="queda da taxa", color="#335c81")
+    eixo.scatter(d["crescimento_pct"], d["queda_registros_pct"], s=14, alpha=0.6,
+                 label="queda dos registros", color="#d1495b")
+    eixo.axhline(0, color="gray", linewidth=0.8)
+    eixo.set(title=nome, xlabel="crescimento da população (%)")
+eixos[0].set_ylabel("queda (%)")
+eixos[0].legend()
 plt.tight_layout()
 plt.show()
 ```
 
-Faixas mutuamente exclusivas são mantidas; idades simples e Total da raw não
-entram de novo na soma. A fonte não possui mulheres por faixa para calcular
-taxa específica. Participações são razões de somas, não médias de percentuais.
-
-## 6. P3: duas colunas, terceira coluna e tabela cruzada
+### Tabela cruzada
 
 ```{python}
-# | label: pergunta-3
-display(resultados["idade_ignorada"].round(3))
-# Duas: ano × participação ignorada; terceira: porte de 2003.
-idade_porte = com_fase.merge(porte[["cod_municipio", "porte_2003"]], on="cod_municipio", validate="many_to_one")
-idade_porte["ignorada"] = idade_porte.faixa_idade_mae.eq("Ignorada")
-tab_idade = pd.crosstab(idade_porte.porte_2003, idade_porte.ignorada,
-                        values=idade_porte.nascidos, aggfunc="sum").fillna(0)
-display(tab_idade.rename(columns={False: "idade conhecida", True: "ignorada"}))
-display((100*tab_idade.div(tab_idade.sum(axis=1), axis=0)).round(3))
-sao_luis = base.loc[base.cod_municipio.eq("2111300") & base.ano.eq(2003)]
-print("São Luís/2003, participação 25–29 (%):", round(
-    100*sao_luis.loc[sao_luis.faixa_idade_mae.eq("25 a 29 anos"), "nascidos"].sum()/sao_luis.nascidos.sum(), 2))
+# | label: p1-tabela-cruzada
+def por_terco(d, nome):
+    """Divide os municípios em três grupos de crescimento e calcula as quedas pela razão das somas."""
+    grupos = d.assign(terco=pd.qcut(d["crescimento_pct"], 3, labels=["menos cresceu", "meio", "mais cresceu"]))
+    somas = grupos.groupby("terco", observed=True).agg(
+        municipios=("cod_municipio", "size"), crescimento_mediano=("crescimento_pct", "median"),
+        registros_inicio=("registros_inicio", "sum"), registros_fim=("registros_fim", "sum"),
+        populacao_inicio=("populacao_inicio", "sum"), populacao_fim=("populacao_fim", "sum"),
+    )
+    return pd.DataFrame({
+        "comparação": nome,
+        "municípios": somas["municipios"],
+        "crescimento mediano (%)": somas["crescimento_mediano"],
+        "queda da taxa (%)": 100 * (1 - (somas["registros_fim"] / somas["populacao_fim"])
+                                    / (somas["registros_inicio"] / somas["populacao_inicio"])),
+        "queda dos registros (%)": 100 * (1 - somas["registros_fim"] / somas["registros_inicio"]),
+    })
+
+
+pd.concat([por_terco(d, nome) for nome, d in comparacoes.items()]).round(1)
 ```
 
-A suspeita herdada de São Luís/2003 (57,02% em 25–29) é mantida sem correção
-arbitrária. A regra de quarentena sobre total municipal não diagnostica todas
-as distribuições etárias. Sensibilidade não equivale a provar erro.
+As duas medidas contam histórias opostas, e a diferença entre elas é a explicação. Na queda dos registros, a expectativa aparece nas duas comparações: o terço que mais cresceu perdeu bem menos registros que o terço que menos cresceu (25% contra 44% na comparação longa, 4% contra 12% depois do Censo), com correlação de −0,23 e −0,24. Na taxa, a relação não se sustenta. Na comparação longa ela vai no sentido contrário (0,34), e depois do Censo desaparece: a correlação fica em zero, e os três terços têm quedas parecidas, de 13,5%, 11,4% e 12,4%. A correlação positiva da comparação longa, portanto, vinha da própria conta, do registro tardio e da correção das estimativas, que pesam na mesma direção nos municípios que mais cresceram.
 
-## 7. Quarentena relida
+A leitura que sobra é que um município que ganha habitantes ganha também registros, mais ou menos na mesma proporção: a taxa cai de forma parecida em todos, cresça o município ou não. A expectativa da P1 não se sustentou para a taxa, que é o que a pergunta mede. Ela se sustentou só para a contagem de registros, o que era quase esperado, porque mais gente produz mais nascimentos.
+
+## 5. P2: as mães de 30 anos ou mais
+
+### Duas colunas
 
 ```{python}
-# | label: quarentena-exploratoria
-quarentena = pd.read_parquet(RAIZ / "data/quarentena/rejeitados.parquet")
-quarentena = quarentena.loc[quarentena.ano.between(2003, 2020)]
-display(quarentena.groupby("motivo", as_index=False).agg(
-    celulas=("cod_municipio", "size"), municipios=("cod_municipio", "nunique")))
-display(quarentena[["cod_municipio", "municipio", "ano", "motivo"]].drop_duplicates().head(10))
+# | label: p2-serie
+participacao = con.sql("""
+    SELECT ano,
+           100.0 * sum(nascidos) FILTER (WHERE list_contains($trinta, faixa_idade_mae))
+                 / sum(nascidos) FILTER (WHERE faixa_idade_mae <> 'Ignorada') AS trinta_ou_mais_pct
+    FROM registros GROUP BY ano ORDER BY ano
+""", params={"trinta": TRINTA_OU_MAIS}).df()
+
+fig, eixo = plt.subplots(figsize=(7, 3.5))
+eixo.plot(participacao["ano"], participacao["trinta_ou_mais_pct"], marker="o", color="#335c81")
+eixo.set(xlabel="ano do registro", ylabel="mães de 30 anos ou mais (%)", ylim=(0, None))
+plt.tight_layout()
+plt.show()
+participacao.set_index("ano").round(1).T
 ```
 
-Reprovação leva o município-ano inteiro para não produzir soma parcial de faixas.
-Não se trocam observações reprovadas por zero. A regra herdada compara participação
-com mediana da série inteira: **vazamento global declarado**, não eliminado por
-estas views. Nenhuma nova exclusão foi escolhida para favorecer as perguntas.
+A participação é calculada sobre os registros com idade conhecida, sem a categoria Ignorada no denominador. A idade ignorada caiu ao longo do período e, se ficasse na conta, faria a participação de qualquer faixa subir só pela melhora no preenchimento. Assim medida, a participação das mães de 30 anos ou mais quase dobra, de 14,3% em 2003 para 27,1% em 2020, e sobe em quase todos os anos.
 
-## 8. Hipóteses a confirmar depois (não conferidas aqui)
+### Uma terceira coluna
 
-Estas previsões são operacionalizáveis, mas redigidas após exploração prévia.
-Não se atribui a elas o estatuto de previsões prospectivas originais.
+```{python}
+# | label: p2-terceira-coluna
+tercos = longa.assign(terco=pd.qcut(longa["crescimento_pct"], 3, labels=["menos cresceu", "meio", "mais cresceu"]))
+con.register("tercos", tercos[["cod_municipio", "terco"]].astype({"terco": str}))
+por_terco_p2 = con.sql("""
+    SELECT terco, ano,
+           100.0 * sum(nascidos) FILTER (WHERE list_contains($trinta, faixa_idade_mae))
+                 / sum(nascidos) FILTER (WHERE faixa_idade_mae <> 'Ignorada') AS trinta_ou_mais_pct
+    FROM registros JOIN tercos USING (cod_municipio) GROUP BY ALL ORDER BY terco, ano
+""", params={"trinta": TRINTA_OU_MAIS}).df()
 
-| Pergunta | Previsão verificável na parte separada | Regra de comparação futura |
-|---|---|---|
-| P1 | Média anual de registros em 2021–2024 menor que em 2003–2020 | Mesmos municípios completos em ambos os períodos; queda positiva |
-| P2 | Participação de 30+ em 2021–2024 maior que em 2003–2020 | Soma das cinco faixas 30+ / soma das dez faixas, mesma coorte |
-| P3 | Participação de Ignorada abaixo de 2% em 2021–2024 | Razão das somas na mesma coorte; limiar descritivo pós-exploratório |
+fig, eixo = plt.subplots(figsize=(7, 3.5))
+for terco in ["menos cresceu", "meio", "mais cresceu"]:
+    d = por_terco_p2[por_terco_p2["terco"] == terco]
+    eixo.plot(d["ano"], d["trinta_ou_mais_pct"], marker="o", markersize=3, label=terco)
+eixo.set(xlabel="ano do registro", ylabel="mães de 30 anos ou mais (%)", ylim=(0, None))
+eixo.legend(title="crescimento da população")
+plt.tight_layout()
+plt.show()
 
-Não se testa a tabela nesta atividade. Uma conferência posterior da reserva já
-exposta será sensibilidade, não confirmação independente. Os valores-p antigos
-estão em documento separado de extensão, não nesta exploração exigida.
+con.sql(f"""
+    SELECT terco,
+           100.0 * sum(nascidos) FILTER (WHERE ano IN {INICIO} AND list_contains($trinta, faixa_idade_mae))
+                 / sum(nascidos) FILTER (WHERE ano IN {INICIO} AND faixa_idade_mae <> 'Ignorada') AS inicio_2003_05_pct,
+           100.0 * sum(nascidos) FILTER (WHERE ano IN {FIM} AND list_contains($trinta, faixa_idade_mae))
+                 / sum(nascidos) FILTER (WHERE ano IN {FIM} AND faixa_idade_mae <> 'Ignorada') AS fim_2018_20_pct
+    FROM registros JOIN tercos USING (cod_municipio) GROUP BY terco
+""", params={"trinta": TRINTA_OU_MAIS}).df().set_index("terco").reindex(["menos cresceu", "meio", "mais cresceu"]).round(1)
+```
 
-## 9. Perguntas para depois
+### Tabela cruzada
 
-- A associação permanece usando nascimentos ocorridos no ano por residência materna?
-- O registro tardio explica diferenças municipais ou desloca registros entre anos?
-- Quanto migração e estrutura etária explicam crescimento e perfil materno?
-- A concentração de São Luís em 2003 se repete no dado original com outro filtro?
-- Como revisar a quarentena sem utilizar o futuro na definição dos limites?
+```{python}
+# | label: p2-tabela-cruzada
+con.sql(f"""
+    SELECT faixa_idade_mae,
+           100.0 * sum(nascidos) FILTER (WHERE ano IN {INICIO})
+                 / sum(sum(nascidos) FILTER (WHERE ano IN {INICIO})) OVER () AS inicio_2003_05_pct,
+           100.0 * sum(nascidos) FILTER (WHERE ano IN {INICIO_POS_CENSO})
+                 / sum(sum(nascidos) FILTER (WHERE ano IN {INICIO_POS_CENSO})) OVER () AS pos_censo_2011_13_pct,
+           100.0 * sum(nascidos) FILTER (WHERE ano IN {FIM})
+                 / sum(sum(nascidos) FILTER (WHERE ano IN {FIM})) OVER () AS fim_2018_20_pct
+    FROM registros WHERE faixa_idade_mae <> 'Ignorada' GROUP BY faixa_idade_mae
+""").df().set_index("faixa_idade_mae").reindex(FAIXAS_CONHECIDAS).round(1)
+```
+
+```{python}
+# | label: p2-municipios
+con.sql(f"""
+    WITH m AS (
+        SELECT cod_municipio,
+               sum(nascidos) FILTER (WHERE ano IN {INICIO} AND list_contains($trinta, faixa_idade_mae))
+                 / sum(nascidos) FILTER (WHERE ano IN {INICIO} AND faixa_idade_mae <> 'Ignorada') AS inicio,
+               sum(nascidos) FILTER (WHERE ano IN {FIM} AND list_contains($trinta, faixa_idade_mae))
+                 / sum(nascidos) FILTER (WHERE ano IN {FIM} AND faixa_idade_mae <> 'Ignorada') AS fim
+        FROM registros GROUP BY cod_municipio
+    )
+    SELECT count(*) AS municipios_com_as_duas_pontas, count(*) FILTER (WHERE fim > inicio) AS subiu
+    FROM m WHERE inicio IS NOT NULL AND fim IS NOT NULL
+""", params={"trinta": TRINTA_OU_MAIS}).df()
+```
+
+A subida não é efeito de poucos municípios grandes: a participação subiu em 196 dos 215 municípios com as duas pontas. Ela aparece também nos três terços de crescimento da P1, de cerca de 15% para 22% a 29%. O terço do meio sobe mais, de 14,9% para 29,2%, mas a subida acontece nos três, então o crescimento da população muda o tamanho da subida, e não a sua direção. Ela também não é marca do registro tardio, porque continua depois do Censo, de 2011–13 para 2018–20, quando quase todo registro já era do próprio ano. A tabela cruzada mostra de onde vem a mudança: as faixas de 30 a 34 e de 35 a 39 anos quase dobram, e as de 15 a 19 e de 20 a 24 anos perdem espaço. Uma ressalva fica para a ponta inicial: em 2003, São Luís concentra 57% dos seus registros na faixa de 25 a 29 anos, contra cerca de 22% nos outros anos, o que puxa para baixo a participação das mães de 30 anos ou mais naquele ano. Usar três anos em cada ponta reduz o peso desse caso, sem retirá-lo.
+
+## 6. A quarentena relida
+
+```{python}
+# | label: quarentena
+con.execute(f"""
+    CREATE VIEW quarentena AS
+    SELECT * FROM 'data/quarentena/rejeitados.parquet'
+    WHERE ano BETWEEN {ANOS_EXPLORADOS[0]} AND {ANOS_EXPLORADOS[1]}
+""")
+con.sql(f"""
+    SELECT motivo, count(*) AS linhas, count(DISTINCT (cod_municipio, ano)) AS pares_municipio_ano,
+           count(DISTINCT cod_municipio) AS municipios, sum(nascidos) AS registros,
+           count(DISTINCT (cod_municipio, ano)) FILTER (WHERE ano IN {INICIO + FIM}) AS pares_nas_pontas,
+           count(DISTINCT cod_municipio) FILTER (WHERE ano IN {INICIO + FIM}) AS municipios_nas_pontas
+    FROM quarentena GROUP BY motivo
+""").df()
+```
+
+```{python}
+# | label: quarentena-populacao
+con.sql("SELECT count(*) AS linhas_em_quarentena FROM 'data/quarentena/populacao.parquet'").df()
+```
+
+Nos anos explorados, a quarentena guarda os pares de município e ano com participação atípica no estado, com as dez faixas cada; a população não tem nenhuma linha em quarentena. Os pares que caem nas pontas da comparação tiram os seus municípios da P1, e são eles que explicam os 16 municípios de fora. A quarentena não foi escolhida para favorecer nenhuma das perguntas: ela veio do diagnóstico, antes delas.
+
+## 7. Hipóteses a confirmar
+
+As previsões abaixo são conferidas na parte guardada. A P1 usa 2021 e 2024, os únicos anos guardados com população publicada, comparados com 2018–2020; a P2 usa os quatro anos guardados.
+
+| | Expectativa | O dado mostrou | Rivais eliminadas | Rivais pendentes | Previsão e decisão |
+|:---|:---|:---|:---|:---|:---|
+| **P1** | Quem mais cresceu teve queda menor da taxa | **Não se sustentou** para a taxa: depois do Censo, os três terços de crescimento têm quedas parecidas (13,5%, 11,4% e 12,4%) e a correlação é zero. Só a contagem de registros cai menos onde a população cresceu mais | a própria conta, o registro tardio e a correção da estimativa de 2011, pela comparação depois do Censo | o acaso; a migração, que muda a idade da população sem aparecer no total | Entre 2018–2020 e os anos guardados (2021 e 2024), a queda da taxa no terço que mais cresceu em 2011–2020 ficará a menos de 3 pontos percentuais da queda no terço que menos cresceu, e a queda dos registros será menor no terço que mais cresceu. Se isso acontecer, o crescimento não serve para prever onde a natalidade cai, e o planejamento por município, como vagas de maternidade, deve partir da contagem de registros |
+| **P2** | A participação das mães de 30+ cresce | **Sustentou-se**: de 14,3% em 2003 para 27,1% em 2020, em 196 de 215 municípios | a idade ignorada, fora do denominador; a mistura de municípios; o registro tardio, pela continuação depois do Censo | o acaso; São Luís em 2003 | Em 2021–2024, a participação das mães de 30 anos ou mais entre os registros com idade conhecida ficará acima da de 2018–2020, e subirá em mais da metade dos municípios. Se isso acontecer, o planejamento do pré-natal deve contar com mais gestações depois dos 30 anos, que pedem mais acompanhamento |
+
+## 8. Perguntas para depois
+
+- Os municípios com crescimento extremo, acima de 90% entre as pontas, têm população real maior ou só uma estimativa corrigida depois do Censo?
+- A tabela 2609 permite separar, por município, as crianças nascidas no próprio ano das registradas tarde. Com esse dado, a taxa da P1 mudaria?
+- A migração de jovens para os municípios que mais crescem aparece na estrutura de idade da população, que a tabela 6579 não traz?
+- Por que São Luís concentra 57% dos registros de 2003 na faixa de 25 a 29 anos?
+- A queda dos registros em 2020 tem relação com o fechamento dos cartórios na pandemia?
 
 ```{python}
 con.close()
