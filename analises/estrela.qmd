@@ -1,6 +1,11 @@
 ---
-title: "Desenho e construção dimensional dos registros de nascidos vivos"
-subtitle: "Etapa 2 — modelo gold construído e reconciliado"
+title: "Desenho do modelo estrela"
+subtitle: "Registros de nascidos vivos e população dos municípios do Maranhão"
+author:
+  - "Gustavo dos Santos Bandeira Rocha (20231SI0006)"
+  - "Deusiane Pimenta Rocha (20231SI0032)"
+  - "Felipe Moura de Oliveira (20231SI0027)"
+date: today
 lang: pt-BR
 format:
   html:
@@ -8,131 +13,103 @@ format:
     embed-resources: true
 execute:
   echo: true
+  warning: false
 ---
 
-## Extensão para população residente
+## 1. Diagnósticos que orientam o desenho
 
-A nova fonte é modelada em `fato_populacao`, no grão município-ano, compartilhando
-`dim_municipio` e `dim_ano`. População não é repetida por faixa etária e não se
-soma entre anos. A carga opcional é reconciliada célula a célula com a trusted;
-as fatos anteriores são preservadas. A aplicação à nova hipótese e a auditoria
-de cobertura estão em [hipotese-populacao.qmd](hipotese-populacao.qmd).
-
-## 1. Processo
-
-O processo observado é **registrar nascidos vivos em cartório**, conforme as
-Estatísticas do Registro Civil do IBGE. O município é o recorte territorial
-da tabela coletada, não o local de ocorrência de cada parto. A fonte só
-disponibiliza contagens agregadas neste projeto: não há identificador de criança,
-cartório ou evento individual.
-
-## 2. Granularidade, antes das colunas
-
-**Uma linha da fato central representa a contagem de registros de um município
-do Maranhão em um ano e uma faixa de idade da mãe.** É a granularidade mais
-fina mantida na trusted, não uma fato transacional por nascimento. A extração
-original tinha idades simples, deliberadamente descartadas na primeira fase;
-não é possível recuperá-las a partir das faixas.
-
-Uma agregada futura terá **uma linha por município e ano**, somando as dez
-faixas da fato central. A coluna `total_municipio_ano` da trusted não desce para
-a fato central: ela repete a mesma medida dez vezes.
-
-## 3. Diagnósticos que justificam o desenho
+Os diagnósticos usam só os anos explorados, de 2003 a 2020.
 
 ```{python}
-# | label: diagnosticos-estrela
+# | label: diagnosticos
 import duckdb
 import pandas as pd
-from IPython.display import display
-from src.prepare import TRUSTED, validar_base
 
-base = validar_base(pd.read_parquet(TRUSTED))
 con = duckdb.connect()
-con.register("trusted", base)
-# Diagnóstico de modelagem só no recorte exploratório.
-con.execute("CREATE VIEW exploratoria AS SELECT * FROM trusted WHERE ano <= 2020")
-display(con.sql("""
-    SELECT SUM(nascidos)::BIGINT AS soma_correta,
-           SUM(total_municipio_ano)::BIGINT AS soma_incorreta_do_total,
-           SUM(total_municipio_ano) / SUM(nascidos) AS fator_duplicacao
-    FROM exploratoria
-""").df())
-assert con.sql("SELECT SUM(total_municipio_ano) = 10 * SUM(nascidos) FROM exploratoria").fetchone()[0]
+con.execute("CREATE VIEW registros AS SELECT * FROM 'data/trusted/nascimentos.parquet' WHERE ano <= 2020")
+con.execute("CREATE VIEW populacao AS SELECT * FROM 'data/trusted/populacao.parquet' WHERE ano <= 2020")
+
+# Uma medida de unidade maior repetida pela junção: o total do município aparece nas dez faixas
+con.sql("""
+    SELECT sum(nascidos)::BIGINT AS soma_certa,
+           sum(total_municipio_ano)::BIGINT AS soma_do_total_repetido,
+           sum(total_municipio_ano) / sum(nascidos) AS vezes
+    FROM registros
+""").df()
 ```
 
-Esse é o mesmo problema conceitual do frete repetido em cada item na aula 8.
-Não basta a junção estar correta: as medidas precisam estar no grão declarado.
-
 ```{python}
-# | label: diagnostico-percentuais
-display(con.sql("""
-    WITH municipal AS (
-        SELECT cod_municipio, ano,
-               SUM(nascidos) FILTER (WHERE faixa_idade_mae = 'Ignorada') AS ignorada,
-               SUM(nascidos) AS total
-        FROM exploratoria GROUP BY cod_municipio, ano
+# | label: diagnostico-populacao-repetida
+# A mesma coisa aconteceria com a população, se ela fosse copiada para cada faixa
+con.sql("""
+    WITH junta AS (
+        SELECT r.cod_municipio, p.populacao
+        FROM registros r JOIN populacao p USING (cod_municipio, ano)
+        WHERE ano = 2020
     )
-    SELECT ROUND(AVG(100.0 * ignorada / NULLIF(total, 0)), 4) AS media_simples_pct,
-           ROUND(100.0 * SUM(ignorada) / NULLIF(SUM(total), 0), 4) AS razao_das_somas_pct
-    FROM municipal
-""").df())
+    SELECT (SELECT sum(populacao) FROM (SELECT DISTINCT cod_municipio, populacao FROM junta))::BIGINT
+               AS populacao_2020,
+           sum(populacao)::BIGINT AS populacao_2020_repetida_por_faixa
+    FROM junta
+""").df()
 ```
-
-A média simples dá o mesmo peso a cada município-ano; a razão das somas mede a
-participação dos registros. São estimandos diferentes: só a segunda responde
-“qual porcentagem dos registros tem idade ignorada?”. Percentuais não se somam.
 
 ```{python}
-# | label: calendario-e-lacunas
-display(con.sql("""
-    WITH calendario AS (SELECT UNNEST(generate_series(2003, 2020)) AS ano),
-    municipios AS (SELECT DISTINCT cod_municipio FROM trusted),
-    presentes AS (SELECT DISTINCT cod_municipio, ano FROM exploratoria)
-    SELECT c.ano, COUNT(*) AS municipios_esperados,
-           COUNT(p.cod_municipio) AS municipios_presentes,
-           COUNT(*) - COUNT(p.cod_municipio) AS lacunas
-    FROM calendario c CROSS JOIN municipios m
-    LEFT JOIN presentes p USING (ano, cod_municipio)
-    GROUP BY c.ano ORDER BY c.ano
-""").df())
-con.close()
+# | label: diagnostico-percentual
+# Um percentual somado errado: média das participações contra razão das somas
+con.sql("""
+    WITH m AS (
+        SELECT cod_municipio, ano,
+               sum(nascidos) FILTER (WHERE faixa_idade_mae = 'Ignorada') AS ignorada,
+               sum(nascidos) AS total
+        FROM registros GROUP BY ALL
+    )
+    SELECT round(avg(100.0 * ignorada / total), 2)      AS media_simples_pct,
+           round(100.0 * sum(ignorada) / sum(total), 2) AS razao_das_somas_pct
+    FROM m
+""").df()
 ```
 
-O calendário será **anual**, 2003–2024 inclusive, gerado independentemente da
-presença de fatos. Não se inventam dias e meses que a fonte não informou. Ao
-contrário do exemplo de dias sem vendas da aula, ausência aqui pode significar
-quarentena: o LEFT JOIN deixa `NULL`, não `COALESCE(..., 0)`.
+```{python}
+# | label: diagnostico-anos-sem-evento
+# Os anos sem população: somem de qualquer conta que parta da tabela de população
+con.sql("""
+    SELECT a.ano, count(p.populacao) AS municipios_com_populacao
+    FROM generate_series(2003, 2020) AS a(ano)
+    LEFT JOIN populacao p USING (ano)
+    GROUP BY a.ano HAVING count(p.populacao) = 0 ORDER BY a.ano
+""").df()
+```
 
-## 4. Dimensões propostas
+O total do município, repetido nas dez faixas, conta cada registro dez vezes, e a população, se fosse copiada para cada faixa, também. A média das participações dá a cada município e ano o mesmo peso, e por isso difere da razão das somas, que é a participação de fato dos registros. Os anos de 2007 e 2010 não têm população, e uma contagem por ano que parta da tabela de população os perde sem avisar. O desenho abaixo responde a esses quatro pontos.
 
-| Tabela | Chave substituta | Chave natural / atributos |
-|---|---|---|
-| `dim_municipio` | `municipio_sk` | código IBGE textual de 7 dígitos, nome, UF=MA, região=Nordeste; hierarquia achatada, sem joins em cadeia |
-| `dim_ano` | `ano_sk = ano` (natural) | ano e década, 2003–2024 inclusive; sem falsa precisão diária |
-| `dim_faixa_idade` | `faixa_sk` | rótulo, ordem de exibição, idade conhecida; Ignorada explícita, última na ordem |
-| `dim_origem_valor` | `origem_sk` | `valor_era_traco` booleano e descrição (zero publicado como traço / valor numérico publicado) |
+## 2. O desenho
 
-As chaves são numeradas deterministicamente por dimensão, em carga completa,
-exceto o calendário anual, que usa o próprio ano, como a dimensão data da aula.
-Dimensões e fatos serão reconstruídas juntas; não reutilizar as chaves dessa
-estratégia em carga incremental. Uma faixa Ignorada é um membro conhecido do
-domínio, não uma FK nula. Chave natural sem correspondência deve interromper a
-carga, não desaparecer num INNER JOIN nem ganhar categoria inventada.
+**Processo de negócio: registrar nascimentos.** Os cartórios registram nascidos vivos, e o IBGE conta esses registros por município, ano e idade da mãe. A população vem de outro processo, a estimativa anual do IBGE, que só entra no modelo como contexto de cada município e ano.
 
-## 5. Fatos e aditividade
+**Granularidade: uma linha por município, ano de registro e faixa de idade da mãe**, e não por município e ano. A segunda pergunta da exploração, sobre as mães de 30 anos ou mais, precisa da faixa, e de um total por município e ano não se volta às faixas. Não há linha por criança porque a fonte não publica o registro individual: a faixa é o menor detalhe disponível.
 
-| Tabela | Grão | Colunas / medidas |
-|---|---|---|
-| `fato_registros` | município × ano × faixa | quatro FKs; `nascidos` inteiro não negativo |
-| `fato_registros_municipio_ano` | município × ano | FKs de município e ano; `registros` = soma das faixas, `registros_idade_ignorada` e `celulas_era_traco` derivadas da central |
+**Dimensões**, todas verdadeiras para a granularidade, porque cada linha tem exatamente um município, um ano, uma faixa e uma origem de valor:
 
-`nascidos` é aditiva entre municípios, faixas mutuamente exclusivas e anos de
-registro. Somar anos mede registros em todo o intervalo, não crianças nascidas
-nesse intervalo. A agregada responde à evolução municipal sem filtrar faixa ou
-origem do valor. Percentuais de idade ignorada e variações entre anos são
-calculados na consulta, com denominador explícito e proteção de divisão por zero.
-`celulas_era_traco` conta células da fonte, não nascimentos desconhecidos.
+| Dimensão | Chave | Atributos para filtrar ou agrupar |
+|:---|:---|:---|
+| `dim_municipio` | `municipio_sk`, numerada pela dimensão | nome do município e porte em 2003 (até 20 mil, 20 a 50 mil, 50 a 100 mil e mais de 100 mil habitantes) |
+| `dim_ano` | o próprio ano, como a dimensão de data | ano e década; todos os anos de 2003 a 2024, inclusive os sem população |
+| `dim_faixa_idade` | `faixa_sk`, na ordem das idades | faixa e grupo de idade (menos de 20, 20 a 29, 30 ou mais e ignorada) |
+| `dim_origem_valor` | `origem_sk` | se o valor veio publicado como traço e a descrição; separa os zeros que o IBGE publicou como `-` |
+
+**Medidas:**
+
+| Tabela | Medida | Classe |
+|:---|:---|:---|
+| `fato_registros` | `nascidos` | aditiva: soma entre municípios, faixas e anos |
+| `fato_populacao` | `populacao` | semiaditiva: soma entre municípios no mesmo ano, mas não entre anos, porque são as mesmas pessoas contadas de novo |
+| `fato_registros_municipio_ano` | `registros`, `registros_idade_ignorada`, `celulas_era_traco` | aditivas |
+| (consulta) | registros por mil habitantes, participação de uma faixa | razões: calculadas na consulta pela razão das somas, nunca somadas nem tiradas pela média |
+
+**O que é de outra granularidade.** Duas colunas medem o município no ano, e não a faixa: o `total_municipio_ano` da trusted e a população. O total não vai para o gold, porque é a soma das faixas e somá-lo junto com elas contaria cada registro dez vezes; quando é preciso, ele sai da agregada. A população vai para uma fato própria, `fato_populacao`, com uma linha por município e ano, que divide `dim_municipio` e `dim_ano` com a fato de registros. A taxa se calcula juntando as duas fatos por município e ano, depois de somar cada uma na sua granularidade.
+
+**Fato agregada: `fato_registros_municipio_ano`.** Atende à pergunta escolhida, sobre crescimento e taxa de registros, que compara municípios e anos. A granularidade é uma linha por município e ano, a mesma da `fato_populacao`, o que deixa a taxa a uma junção de distância. Ficam os filtros de município (com o porte) e de ano (com a década). Perde-se a chave da faixa e a da origem do valor: a agregada guarda quantos registros tiveram idade ignorada e quantas células eram traço, mas não volta à distribuição por faixa.
 
 ```{mermaid}
 erDiagram
@@ -140,63 +117,43 @@ erDiagram
     dim_ano ||--o{ fato_registros : ano_sk
     dim_faixa_idade ||--o{ fato_registros : faixa_sk
     dim_origem_valor ||--o{ fato_registros : origem_sk
+    dim_municipio ||--o{ fato_populacao : municipio_sk
+    dim_ano ||--o{ fato_populacao : ano_sk
     dim_municipio ||--o{ fato_registros_municipio_ano : municipio_sk
     dim_ano ||--o{ fato_registros_municipio_ano : ano_sk
 ```
 
-A agregada deriva da central; não deve ser juntada diretamente a ela para
-somar `registros`, pois isso recriaria o total repetido por faixa. Não é uma
-segunda fonte independente. Medidas compartilhadas são reconciliadas no mesmo
-grão. Não se cria uma fato adicional só para armazenar o Total redundante da
-trusted.
+## 3. O gold construído
 
-Matriz de barramento do núcleo: registrar nascidos vivos usa município, ano e
-idade da mãe; origem do valor é contexto técnico de qualidade. A extensão
-opcional observa a população residente estimada por município-ano: usa somente
-município e ano, com população aditiva entre municípios do mesmo ano e não no
-tempo. Tabela e variável são identificadores de proveniência, não medidas.
-
-## 6. Construção executada e evidência
-
-1. Validar trusted, dez faixas por par e código/nome sem conflito; construir as
-   quatro dimensões, incluindo os 22 anos e as dez faixas do domínio.
-2. Conferir unicidade das chaves naturais e substitutas e, antes das fatos,
-   contar órfãs com LEFT JOIN para cada chave; todas devem dar zero.
-3. Construir central com LEFT JOIN; conferir FKs não nulas e grão único.
-4. Conferir trusted × central: número de linhas, soma de `nascidos`, contagem
-   de traços; conferir também por município/ano/faixa para detectar trocas que
-   preservem o total global. Zero em uma medida não prova que as outras batem.
-5. Construir agregada a partir da central e reconciliar contagens de pares,
-   registros, idade ignorada e células publicadas como traço.
-6. Testar propositalmente a dimensão sem o último ano; exigir falha antes de
-   qualquer gravação. Desfazer a alteração. Não basta procurar FK nula depois
-   de INNER JOIN, porque ele teria apagado as linhas órfãs.
-7. Só após todas as conferências, gravar Parquets em `data/gold/`, reler,
-   conferir valores e tipos e testar reexecução determinística.
+O `src/model.py` constrói as sete tabelas do desenho. A leitura abaixo confere que o que está em `data/gold/` é o desenho, e calcula uma resposta só com o gold: a taxa de registros por mil habitantes por porte, juntando a agregada e a população por município e ano.
 
 ```{python}
-# | label: gold-construida
-from pathlib import Path
-from src.model import DIR_GOLD, TABELAS
+# | label: gold
+from src.model import DIR_GOLD, TABELAS_GOLD
 
-gold = {nome: pd.read_parquet(DIR_GOLD / f"{nome}.parquet") for nome in TABELAS}
-if (DIR_GOLD / "fato_populacao.parquet").exists():
-    gold["fato_populacao"] = pd.read_parquet(DIR_GOLD / "fato_populacao.parquet")
-contagens = pd.DataFrame([{"tabela": nome, "linhas": len(tabela),
-                           "colunas": len(tabela.columns)}
-                          for nome, tabela in gold.items()])
-display(contagens)
-trusted_linhas = len(base)
-assert len(gold["fato_registros"]) == trusted_linhas
-assert gold["fato_registros"].nascidos.sum() == base.nascidos.sum()
-assert len(gold["fato_registros_municipio_ano"]) == base[["cod_municipio", "ano"]].drop_duplicates().shape[0]
-assert gold["fato_registros_municipio_ano"].registros.sum() == base.nascidos.sum()
+for nome in TABELAS_GOLD:
+    con.execute(f"CREATE VIEW {nome} AS SELECT * FROM '{(DIR_GOLD / nome).as_posix()}.parquet'")
+
+pd.DataFrame([
+    {"tabela": nome, "linhas": con.sql(f"SELECT count(*) FROM {nome}").fetchone()[0],
+     "colunas": ", ".join(con.sql(f"SELECT * FROM {nome} LIMIT 0").columns)}
+    for nome in TABELAS_GOLD
+])
 ```
 
-**Avaliação:** as seis tabelas foram construídas e conferidas com a trusted,
-inclusive por município-ano-faixa e por município-ano. O código de produção é
-`src/model.py`; as linhas ausentes por quarentena continuam ausentes na fato,
-sem serem preenchidas por zero. A sétima tabela existe somente quando a carga
-inclui `--com-populacao`, explicitamente; ela é reconciliada com sua própria
-trusted e não altera as fatos originais. A atividade 02 não pede testar a reserva:
-esse exame cabe à etapa seguinte, com a exposição anterior declarada.
+```{python}
+# | label: gold-consulta
+con.sql("""
+    SELECT m.porte_2003, count(DISTINCT m.municipio_sk) AS municipios,
+           round(1000.0 * sum(r.registros) / sum(p.populacao), 1) AS registros_por_mil_2018_20
+    FROM fato_registros_municipio_ano r
+    JOIN fato_populacao p USING (municipio_sk, ano_sk)
+    JOIN dim_municipio m USING (municipio_sk)
+    WHERE r.ano_sk BETWEEN 2018 AND 2020
+    GROUP BY m.porte_2003 ORDER BY min(p.populacao)
+""").df()
+```
+
+```{python}
+con.close()
+```
